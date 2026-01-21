@@ -1,0 +1,123 @@
+/* 3D container gives perspective */
+.dice-wrapper {
+  width: 80px;
+  height: 80px;
+  perspective: 600px;
+}
+
+/* Core cube */
+.dice3d {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  transform-style: preserve-3d;
+  transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.3, 1.1);
+}
+
+/* Faces */
+.face {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  border-radius: 14px;
+  background: radial-gradient(circle at 30% 30%, #ffffff, #e5e7eb);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.6),
+    inset 0 0 6px rgba(148, 163, 184, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* Position each face on the cube */
+.face-1 {  /* front */
+  transform: translateZ(40px);
+}
+.face-6 {  /* back */
+  transform: rotateY(180deg) translateZ(40px);
+}
+.face-2 {  /* right */
+  transform: rotateY(90deg) translateZ(40px);
+}
+.face-5 {  /* left */
+  transform: rotateY(-90deg) translateZ(40px);
+}
+.face-3 {  /* top */
+  transform: rotateX(90deg) translateZ(40px);
+}
+.face-4 {  /* bottom */
+  transform: rotateX(-90deg) translateZ(40px);
+}
+
+/* Pips (dots) */
+.pip {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #111827;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* Pip positions */
+.center       { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+
+.top-left     { top: 20%; left: 20%; transform: translate(-50%, -50%); }
+.top-right    { top: 20%; left: 80%; transform: translate(-50%, -50%); }
+
+.bottom-left  { top: 80%; left: 20%; transform: translate(-50%, -50%); }
+.bottom-right { top: 80%; left: 80%; transform: translate(-50%, -50%); }
+
+.mid-left     { top: 50%; left: 20%; transform: translate(-50%, -50%); }
+.mid-right    { top: 50%; left: 80%; transform: translate(-50%, -50%); }
+
+/* ====== Static poses for each value ====== */
+/* These rotations decide which face points toward the player */
+
+.dice3d.show-1 {           /* front */
+  transform: rotateX(0deg) rotateY(0deg);
+}
+
+.dice3d.show-2 {           /* right */
+  transform: rotateY(-90deg);
+}
+
+.dice3d.show-3 {           /* top */
+  transform: rotateX(-90deg);
+}
+
+.dice3d.show-4 {           /* bottom */
+  transform: rotateX(90deg);
+}
+
+.dice3d.show-5 {           /* left */
+  transform: rotateY(90deg);
+}
+
+.dice3d.show-6 {           /* back */
+  transform: rotateY(180deg);
+}
+
+/* ====== Rolling animation ====== */
+
+.dice3d.rolling {
+  animation: dice-tumble 0.6s linear infinite;
+}
+
+@keyframes dice-tumble {
+  0% {
+    transform: rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+  }
+  25% {
+    transform: rotateX(160deg) rotateY(120deg) rotateZ(30deg);
+  }
+  50% {
+    transform: rotateX(260deg) rotateY(240deg) rotateZ(80deg);
+  }
+  75% {
+    transform: rotateX(420deg) rotateY(320deg) rotateZ(130deg);
+  }
+  100% {
+    transform: rotateX(540deg) rotateY(360deg) rotateZ(180deg);
+  }
+}

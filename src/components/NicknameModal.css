@@ -1,0 +1,103 @@
+.nick-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5000;
+}
+
+.nick-card {
+  background: #0f172a;
+  padding: 24px 28px;
+  border-radius: 14px;
+  width: 360px;
+  color: white;
+  text-align: center;
+  border: 1px solid #334155;
+  box-shadow: 0 0 30px rgba(0,0,0,0.4);
+}
+
+.nick-card h2 {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.nick-card p {
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.nick-input {
+  width: 100%;
+  border-radius: 12px;
+  padding: 10px;
+  margin-top: 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: white;
+  font-size: 14px;
+}
+
+.nick-error {
+  color: #ef4444;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.nick-submit {
+  margin-top: 14px;
+  padding: 10px 20px;
+  width: 100%;
+  background: #22c55e;
+  border-radius: 12px;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  color: #021b10;
+  transition: 0.2s;
+}
+
+.nick-submit:hover {
+  background: #16a34a;
+}
+
+.nick-cancel {
+  margin-top: 10px;
+  padding: 10px 20px;
+  width: 100%;
+  border-radius: 12px;
+  font-weight: 700;
+  border: 1px solid #475569;
+  cursor: pointer;
+  background: #1e293b;
+  color: #cbd5e1;
+  transition: 0.2s;
+}
+
+.nick-cancel:hover {
+  background: #334155;
+  border-color: #64748b;
+}
+
+.nick-card {
+  position: relative;   /* REQUIRED for close button */
+}
+
+.nick-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.nick-close:hover {
+  color: white;
+}
+

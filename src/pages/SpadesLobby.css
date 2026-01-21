@@ -1,0 +1,75 @@
+.spades-lobby-wrapper {
+  text-align: center;
+  padding-top: 20px;
+}
+
+.spades-title {
+  font-size: 32px;
+  font-weight: 800;
+  color: #22d3ee;
+}
+
+.spades-sub {
+  margin-top: 6px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.spades-grid {
+  margin-top: 30px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 22px;
+  padding: 0 20px;
+}
+
+.spades-card {
+  background: #0f172a;
+  padding: 18px;
+  border-radius: 14px;
+  border: 1px solid #334155;
+  text-align: center;
+  transition: 0.2s;
+  box-shadow: 0 0 18px rgba(0, 0, 0, 0.2);
+}
+
+.spades-card:hover {
+  border-color: #22d3ee;
+  transform: translateY(-4px);
+  box-shadow: 0 0 24px rgba(34, 211, 238, 0.25);
+}
+
+.spades-card-name {
+  font-size: 22px;
+  font-weight: 700;
+  color: white;
+}
+
+.spades-card-stake {
+  margin-top: 8px;
+  font-size: 14px;
+  color: #22d3ee;
+  font-weight: 600;
+}
+
+.spades-card-players {
+  margin-top: 10px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.spades-join-btn {
+  margin-top: 14px;
+  background: #22d3ee;
+  color: #0f172a;
+  padding: 8px 0;
+  width: 100%;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.spades-join-btn:hover {
+  background: #06b6d4;
+}

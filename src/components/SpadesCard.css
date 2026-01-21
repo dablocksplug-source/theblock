@@ -1,0 +1,52 @@
+/* src/components/SpadesCard.css */
+
+.sp-card {
+  width: 70px;
+  height: 100px;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  border: 2px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 6px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
+}
+
+.sp-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+}
+
+.sp-card.red {
+  color: #d62828; /* vivid casino red */
+}
+
+.sp-card.black {
+  color: #222;
+}
+
+.sp-card.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sp-card.glow {
+  box-shadow: 0 0 15px rgba(0,255,255,0.7);
+  border-color: cyan;
+}
+
+.sp-rank {
+  font-size: 26px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.sp-suit {
+  font-size: 32px;
+  text-align: right;
+  margin-top: -10px;
+}
