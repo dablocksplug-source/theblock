@@ -15,7 +15,7 @@
     "ethers": "^6.15.0",
     "framer-motion": "^12.23.24",
     "react": "18.3.1",
-    "react-dom":  "18.3.1",
+    "react-dom": "18.3.1",
     "react-router-dom": "^7.9.5",
     "socket.io": "^4.8.3",
     "viem": "^2.38.6",
@@ -37,6 +37,8 @@
     "vite": "npm:rolldown-vite@7.1.14"
   },
   "overrides": {
-    "vite": "npm:rolldown-vite@7.1.14"
+    "bufferutil": false,
+    "utf-8-validate": false
   }
 }
+
