@@ -11,6 +11,9 @@ import { WalletProvider } from "./context/WalletContext";
 import NicknameProvider from "./context/NicknameContext";
 import { SoundProvider } from "./context/SoundContext";
 
+// ✅ Gate (ONLY allow "/" + "/blockswap")
+import ConstructionGate from "./components/ConstructionGate.jsx";
+
 // Pages
 import TheBlock from "./pages/TheBlock.jsx";
 import BlockPlay from "./pages/BlockPlay.jsx";
@@ -35,36 +38,130 @@ const router = createBrowserRouter([
     path: "/",
     element: <App />,
     children: [
+      // ✅ HOME is allowed
       { index: true, element: <TheBlock /> },
 
-      { path: "blockplay", element: <BlockPlay /> },
-      { path: "blockplay/dice", element: <DiceLobby /> },
-      { path: "blockplay/dice/:tableId", element: <DiceGame /> },
-      { path: "blockplay/spades", element: <SpadesLobby /> },
-      { path: "blockplay/spades/:tableId", element: <SpadesTable /> },
+      // 🚧 EVERYTHING BELOW is gated (redirects to /blockswap)
+      {
+        path: "blockplay",
+        element: (
+          <ConstructionGate>
+            <BlockPlay />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockplay/dice",
+        element: (
+          <ConstructionGate>
+            <DiceLobby />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockplay/dice/:tableId",
+        element: (
+          <ConstructionGate>
+            <DiceGame />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockplay/spades",
+        element: (
+          <ConstructionGate>
+            <SpadesLobby />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockplay/spades/:tableId",
+        element: (
+          <ConstructionGate>
+            <SpadesTable />
+          </ConstructionGate>
+        ),
+      },
 
-      { path: "nickname-test", element: <NicknameTestPage /> },
+      {
+        path: "nickname-test",
+        element: (
+          <ConstructionGate>
+            <NicknameTestPage />
+          </ConstructionGate>
+        ),
+      },
 
-      { path: "blockbet", element: <BlockBet /> },
-      { path: "blockpay", element: <BlockPay /> },
-      { path: "blockproof", element: <BlockProof /> },
-      { path: "blockshop", element: <BlockShop /> },
+      {
+        path: "blockbet",
+        element: (
+          <ConstructionGate>
+            <BlockBet />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockpay",
+        element: (
+          <ConstructionGate>
+            <BlockPay />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockproof",
+        element: (
+          <ConstructionGate>
+            <BlockProof />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "blockshop",
+        element: (
+          <ConstructionGate>
+            <BlockShop />
+          </ConstructionGate>
+        ),
+      },
 
+      // ✅ BLOCKSWAP is allowed (and its subroutes)
       { path: "blockswap", element: <BlockSwap /> },
 
-      // ✅ NEW canonical rules URL
+      // ✅ BlockSwap subpage allowed (still under /blockswap)
       { path: "blockswap/early-bird-rules", element: <PresaleRules /> },
 
-      // ✅ Backward-compatible old URL → redirect to new
+      // ✅ redirect old URL to new (still allowed)
       {
         path: "blockswap/presale-rules",
         element: <Navigate to="/blockswap/early-bird-rules" replace />,
       },
 
-      { path: "dicelobby", element: <DiceLobby /> },
-      { path: "lore", element: <Lore /> },
-
-      { path: "investor", element: <InvestorOverview /> },
+      // 🚧 older alias routes — gated
+      {
+        path: "dicelobby",
+        element: (
+          <ConstructionGate>
+            <DiceLobby />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "lore",
+        element: (
+          <ConstructionGate>
+            <Lore />
+          </ConstructionGate>
+        ),
+      },
+      {
+        path: "investor",
+        element: (
+          <ConstructionGate>
+            <InvestorOverview />
+          </ConstructionGate>
+        ),
+      },
     ],
   },
 ]);
