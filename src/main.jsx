@@ -11,8 +11,8 @@ import { WalletProvider } from "./context/WalletContext";
 import NicknameProvider from "./context/NicknameContext";
 import { SoundProvider } from "./context/SoundContext";
 
-// ✅ Gate (ONLY allow "/" + "/blockswap")
-import ConstructionGate from "./components/ConstructionGate.jsx";
+// ✅ Single gate for the whole app (driven by presale.config.js)
+import PresaleGate from "./components/PresaleGate.jsx";
 
 // Pages
 import TheBlock from "./pages/TheBlock.jsx";
@@ -38,130 +38,40 @@ const router = createBrowserRouter([
     path: "/",
     element: <App />,
     children: [
-      // ✅ HOME is allowed
       { index: true, element: <TheBlock /> },
 
-      // 🚧 EVERYTHING BELOW is gated (redirects to /blockswap)
-      {
-        path: "blockplay",
-        element: (
-          <ConstructionGate>
-            <BlockPlay />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockplay/dice",
-        element: (
-          <ConstructionGate>
-            <DiceLobby />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockplay/dice/:tableId",
-        element: (
-          <ConstructionGate>
-            <DiceGame />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockplay/spades",
-        element: (
-          <ConstructionGate>
-            <SpadesLobby />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockplay/spades/:tableId",
-        element: (
-          <ConstructionGate>
-            <SpadesTable />
-          </ConstructionGate>
-        ),
-      },
+      // Districts (will be gated by PresaleGate when PRESALE_MODE=true)
+      { path: "blockplay", element: <BlockPlay /> },
+      { path: "blockplay/dice", element: <DiceLobby /> },
+      { path: "blockplay/dice/:tableId", element: <DiceGame /> },
+      { path: "blockplay/spades", element: <SpadesLobby /> },
+      { path: "blockplay/spades/:tableId", element: <SpadesTable /> },
 
-      {
-        path: "nickname-test",
-        element: (
-          <ConstructionGate>
-            <NicknameTestPage />
-          </ConstructionGate>
-        ),
-      },
+      { path: "nickname-test", element: <NicknameTestPage /> },
 
-      {
-        path: "blockbet",
-        element: (
-          <ConstructionGate>
-            <BlockBet />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockpay",
-        element: (
-          <ConstructionGate>
-            <BlockPay />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockproof",
-        element: (
-          <ConstructionGate>
-            <BlockProof />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "blockshop",
-        element: (
-          <ConstructionGate>
-            <BlockShop />
-          </ConstructionGate>
-        ),
-      },
+      { path: "blockbet", element: <BlockBet /> },
+      { path: "blockpay", element: <BlockPay /> },
+      { path: "blockproof", element: <BlockProof /> },
+      { path: "blockshop", element: <BlockShop /> },
 
-      // ✅ BLOCKSWAP is allowed (and its subroutes)
+      // BlockSwap (allowed)
       { path: "blockswap", element: <BlockSwap /> },
 
-      // ✅ BlockSwap subpage allowed (still under /blockswap)
+      // Rules page (allowed if allowlisted)
       { path: "blockswap/early-bird-rules", element: <PresaleRules /> },
 
-      // ✅ redirect old URL to new (still allowed)
+      // Old URL → redirect to new
       {
         path: "blockswap/presale-rules",
         element: <Navigate to="/blockswap/early-bird-rules" replace />,
       },
 
-      // 🚧 older alias routes — gated
-      {
-        path: "dicelobby",
-        element: (
-          <ConstructionGate>
-            <DiceLobby />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "lore",
-        element: (
-          <ConstructionGate>
-            <Lore />
-          </ConstructionGate>
-        ),
-      },
-      {
-        path: "investor",
-        element: (
-          <ConstructionGate>
-            <InvestorOverview />
-          </ConstructionGate>
-        ),
-      },
+      // Old alias routes (will be gated too when PRESALE_MODE=true)
+      { path: "dicelobby", element: <DiceLobby /> },
+
+      // Read-only pages (we will allow these in allowlist)
+      { path: "lore", element: <Lore /> },
+      { path: "investor", element: <InvestorOverview /> },
     ],
   },
 ]);
@@ -171,7 +81,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <WalletProvider>
       <NicknameProvider>
         <SoundProvider>
-          <RouterProvider router={router} />
+          <PresaleGate>
+            <RouterProvider router={router} />
+          </PresaleGate>
         </SoundProvider>
       </NicknameProvider>
     </WalletProvider>

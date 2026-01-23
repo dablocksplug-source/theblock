@@ -1,10 +1,14 @@
 // src/config/presale.config.js
-export const PRESALE_MODE = false; // <-- flip to true when you're ready to mute the rest
 
-// Allowed routes during presale
+// ✅ When true, ONLY allow the routes below (everything else redirects)
+export const PRESALE_MODE = true;
+
+// ✅ Allowed routes while the rest of The Block is under construction
 export const PRESALE_ALLOWLIST = new Set([
-  "/",          // TheBlock page (home)
-  "/blockswap", // presale
-  "/lore",      // optional (leave if you want read-only pages)
-  "/blockproof" // optional
+  "/",                           // Home
+  "/blockswap",                  // BlockSwap
+  "/blockswap/early-bird-rules", // Rules page
+  "/blockswap/presale-rules",    // Old rules URL (redirects, but allow it)
+  "/lore",                       // Lore / info
+  "/investor"                    // Reading / investor overview
 ]);
