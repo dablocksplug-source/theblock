@@ -23,6 +23,17 @@ function clampInt(val, min, max) {
   return Math.max(min, Math.min(max, i));
 }
 
+// ✅ Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
+function normalizeBricksOunces(bricks, ounces, ozPerBrick) {
+  const b = clampInt(bricks, 0, 1_000_000);
+  const oRaw = clampInt(ounces, 0, 1_000_000);
+
+  const carry = Math.floor(oRaw / ozPerBrick);
+  const o = oRaw % ozPerBrick;
+
+  return { bricks: b + carry, ounces: o };
+}
+
 export default function BlockSwap() {
   const { walletAddress, isConnected, connectWallet } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
@@ -122,6 +133,26 @@ export default function BlockSwap() {
 
     return rows;
   }, [d.balancesOz, d.labels, d.circulatingOz, ozPerBrick]);
+
+  // ✅ Street Activity feed (buys/sells/injections/rewards/etc)
+  const streetActivity = useMemo(() => {
+    // If adapter already provides activity, use it.
+    const raw = Array.isArray(d.activity) ? d.activity : [];
+
+    // Keep it newest-first if it isn’t already.
+    const items = [...raw].reverse?.() ? raw : raw;
+
+    // If it's empty, show a placeholder.
+    if (!items.length) return [];
+
+    // Normalize for rendering
+    return items
+      .map((x) => ({
+        text: String(x?.text ?? ""),
+        ts: String(x?.ts ?? ""),
+      }))
+      .filter((x) => x.text);
+  }, [d.activity]);
 
   const handleBuy = () => {
     setErr("");
@@ -284,31 +315,43 @@ export default function BlockSwap() {
                       step="1"
                       inputMode="numeric"
                       value={buyBricks}
-                      onChange={(e) =>
-                        setBuyBricks(clampInt(parseInt(e.target.value || "0", 10), 0, 1_000_000))
-                      }
+                      onChange={(e) => {
+                        const next = normalizeBricksOunces(
+                          parseInt(e.target.value || "0", 10),
+                          buyOunces,
+                          ozPerBrick
+                        );
+                        setBuyBricks(next.bricks);
+                        setBuyOunces(next.ounces);
+                      }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
                     />
                   </div>
 
                   <div>
                     <label className="mb-2 block text-xs text-slate-400">
-                      Ounces (0–{ozPerBrick - 1})
+                      Ounces
                     </label>
                     <input
                       type="number"
                       min="0"
-                      max={ozPerBrick - 1}
                       step="1"
                       inputMode="numeric"
                       value={buyOunces}
-                      onChange={(e) =>
-                        setBuyOunces(
-                          clampInt(parseInt(e.target.value || "0", 10), 0, ozPerBrick - 1)
-                        )
-                      }
+                      onChange={(e) => {
+                        const next = normalizeBricksOunces(
+                          buyBricks,
+                          parseInt(e.target.value || "0", 10),
+                          ozPerBrick
+                        );
+                        setBuyBricks(next.bricks);
+                        setBuyOunces(next.ounces);
+                      }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
                     />
+                    <div className="mt-1 text-[0.65rem] text-slate-500">
+                      Auto-carries into bricks (0–{ozPerBrick - 1} shown).
+                    </div>
                   </div>
                 </div>
 
@@ -362,31 +405,43 @@ export default function BlockSwap() {
                       step="1"
                       inputMode="numeric"
                       value={sellBricks}
-                      onChange={(e) =>
-                        setSellBricks(clampInt(parseInt(e.target.value || "0", 10), 0, 1_000_000))
-                      }
+                      onChange={(e) => {
+                        const next = normalizeBricksOunces(
+                          parseInt(e.target.value || "0", 10),
+                          sellOunces,
+                          ozPerBrick
+                        );
+                        setSellBricks(next.bricks);
+                        setSellOunces(next.ounces);
+                      }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
                     />
                   </div>
 
                   <div>
                     <label className="mb-2 block text-xs text-slate-400">
-                      Ounces (0–{ozPerBrick - 1})
+                      Ounces
                     </label>
                     <input
                       type="number"
                       min="0"
-                      max={ozPerBrick - 1}
                       step="1"
                       inputMode="numeric"
                       value={sellOunces}
-                      onChange={(e) =>
-                        setSellOunces(
-                          clampInt(parseInt(e.target.value || "0", 10), 0, ozPerBrick - 1)
-                        )
-                      }
+                      onChange={(e) => {
+                        const next = normalizeBricksOunces(
+                          sellBricks,
+                          parseInt(e.target.value || "0", 10),
+                          ozPerBrick
+                        );
+                        setSellBricks(next.bricks);
+                        setSellOunces(next.ounces);
+                      }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
                     />
+                    <div className="mt-1 text-[0.65rem] text-slate-500">
+                      Auto-carries into bricks (0–{ozPerBrick - 1} shown).
+                    </div>
                   </div>
                 </div>
 
@@ -416,6 +471,40 @@ export default function BlockSwap() {
                   Pays from the Buyback Vault when wired live.
                 </p>
               </div>
+            </div>
+
+            {/* ✅ Street Activity feed in the blank space */}
+            <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Street Activity
+                </h3>
+                <span className="text-[0.7rem] text-slate-500">
+                  Buys • Sellbacks • Vault feeds • Rewards
+                </span>
+              </div>
+
+              <ul className="mt-3 space-y-2 text-xs text-slate-300 max-h-44 overflow-y-auto pr-1">
+                {streetActivity.length ? (
+                  streetActivity.map((item, idx) => (
+                    <li
+                      key={idx}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2"
+                    >
+                      <span className="leading-relaxed">{item.text}</span>
+                      <span className="shrink-0 text-slate-500">{item.ts}</span>
+                    </li>
+                  ))
+                ) : (
+                  <li className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-3 text-slate-500">
+                    No activity yet. First buys / sells will show up here.
+                  </li>
+                )}
+              </ul>
+
+              <p className="mt-2 text-[0.7rem] text-slate-500">
+                For now this updates when you Refresh / Buy / Sell / Admin changes.
+              </p>
             </div>
           </div>
 
@@ -545,9 +634,9 @@ export default function BlockSwap() {
                 <tr>
                   <th className="px-3 py-2 font-medium">Holder</th>
                   <th className="px-3 py-2 font-medium">Address</th>
-                  <th className="px-3 py-2 font-medium text-right">Weight</th>
+                  <th className="px-3 py-2 font-medium text-right">Bricks + Oz</th>
                   <th className="px-3 py-2 font-medium text-right">% of circ</th>
-                  <th className="px-3 py-2 font-medium text-right">36oz+</th>
+                  <th className="px-3 py-2 font-medium text-right">Brick Holder</th>
                 </tr>
               </thead>
               <tbody>
