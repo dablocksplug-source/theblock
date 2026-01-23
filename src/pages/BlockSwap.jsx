@@ -1,10 +1,12 @@
 // src/pages/BlockSwap.jsx
 import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+
 import { blockswapAdapter } from "../services/blockswapAdapter";
 import BlockSwapAdminPanel from "../components/BlockSwapAdminPanel";
+
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
-import { Link } from "react-router-dom";
 
 const shortAddr = (a) =>
   a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
@@ -52,9 +54,11 @@ export default function BlockSwap() {
   }, [walletAddress, d.ADMIN_WALLET]);
 
   const ozPerBrick = d.ouncesPerBrick || 36;
-  const STABLE = d.STABLE_SYMBOL || "USDT";
 
-  // ---- Bricks + Ounces inputs (no decimals) ----
+  // Settlement stable symbol (you can switch to USDC later)
+  const STABLE = d.STABLE_SYMBOL || "USDC";
+
+  // ---- Inputs (integers only) ----
   const [buyBricks, setBuyBricks] = useState(0);
   const [buyOunces, setBuyOunces] = useState(0);
 
@@ -82,12 +86,6 @@ export default function BlockSwap() {
   const canBuy = d.presaleActive && buyTotalOz > 0;
   const canSell = sellTotalOz > 0;
 
-  const ownershipPerBrickPct = useMemo(() => {
-    return d.totalBricks ? (1 / d.totalBricks) * 100 : 0;
-  }, [d.totalBricks]);
-
-  const brickPoolPct = d.brickPoolPct || 0;
-
   // Build holders table from balances in state
   const holderRows = useMemo(() => {
     const balances = d.balancesOz || {};
@@ -95,18 +93,20 @@ export default function BlockSwap() {
 
     const rows = Object.entries(balances)
       .map(([addrLower, ounces]) => {
-        const { b, o } = bricksOzFromTotal(Number(ounces || 0), ozPerBrick);
+        const ouncesNum = Number(ounces || 0);
+        const { b, o } = bricksOzFromTotal(ouncesNum, ozPerBrick);
+
         const pctWeightCirculating = d.circulatingOz
-          ? (Number(ounces || 0) / d.circulatingOz) * 100
+          ? (ouncesNum / d.circulatingOz) * 100
           : 0;
 
         const label = labels[addrLower] || shortAddr(addrLower);
-        const isBrickHolder = Number(ounces || 0) >= ozPerBrick;
+        const isBrickHolder = ouncesNum >= ozPerBrick;
 
         return {
           address: addrLower,
           label,
-          ounces: Number(ounces || 0),
+          ounces: ouncesNum,
           weightLabel: `${b} brick${b === 1 ? "" : "s"} ${o} oz`,
           pctWeightCirculating,
           isBrickHolder,
@@ -165,8 +165,10 @@ export default function BlockSwap() {
     }
   };
 
-  const transfersLocked =
-    d.presaleActive && d.transfersDisabledDuringPresale;
+  // Balances (numbers only) — this is what you wanted
+  const buybackVault = Number(d.buybackVault || 0);
+  const theBlockTreasury = Number(d.theBlockTreasury || 0);
+  const buybackCapacityOz = Number(d.buybackCapacityOz || 0);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
@@ -182,13 +184,7 @@ export default function BlockSwap() {
 
             {d.presaleActive && (
               <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-amber-200">
-                Early Bird Special
-              </span>
-            )}
-
-            {transfersLocked && (
-              <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">
-                Transfers Locked
+                Early Bird
               </span>
             )}
 
@@ -198,15 +194,6 @@ export default function BlockSwap() {
               </span>
             ) : null}
           </div>
-
-          {d.presaleActive ? (
-            <Link
-              to="/blockswap/early-bird-rules"
-              className="ml-2 rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-sky-400 hover:text-sky-300"
-            >
-              Early Bird Rules
-            </Link>
-          ) : null}
 
           <div className="flex flex-wrap items-center gap-2 text-sm text-slate-300">
             <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-medium">
@@ -228,6 +215,20 @@ export default function BlockSwap() {
                 Connect Wallet
               </button>
             ) : null}
+
+            <Link
+              to="/"
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
+            >
+              Home
+            </Link>
+
+            <Link
+              to="/investor"
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
+            >
+              Inside the Hustle
+            </Link>
           </div>
         </div>
       </header>
@@ -246,148 +247,18 @@ export default function BlockSwap() {
           onUpdated={(snap) => setD(snap)}
         />
 
-        {/* Intro */}
-        <section className="mb-6 grid gap-4 lg:grid-cols-[2fr,1fr]">
-          <div className="space-y-3">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Bricks &amp; Ounces
-            </h1>
-
-            <p className="text-sm leading-relaxed text-slate-300">
-              The Block has a fixed ownership supply of{" "}
-              <span className="font-semibold">
-                {Number(d.totalBricks || 0).toLocaleString()}
-              </span>{" "}
-              bricks <span className="text-slate-400">(1 ton)</span> ={" "}
-              <span className="font-semibold">
-                {Number(d.totalOz || 0).toLocaleString()}
-              </span>{" "}
-              ounces total. One brick equals{" "}
-              <span className="font-semibold">{Number(d.ouncesPerBrick || 36)}</span>{" "}
-              ounces.
-              <br />
-              Ownership weight is measured by ounces. When profits are{" "}
-              <span className="font-semibold">being distributed</span>, payouts
-              use ounce-weight. Brick Holder perks unlock at a full brick (36 oz).
-            </p>
-
-            <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-              <span className="rounded-full bg-slate-800 px-3 py-1">
-                Phase {d.phase}: Profit Pool {Math.round(brickPoolPct * 100)}% of
-                net profit
-              </span>
-              <span className="rounded-full bg-slate-800 px-3 py-1">
-                1 brick = {ownershipPerBrickPct.toFixed(2)}% of total ownership
-                weight
-              </span>
-              <span className="rounded-full bg-slate-800 px-3 py-1">
-                Holder % = (your ounces ÷ circulating ounces) × 100
-              </span>
-            </div>
-          </div>
-
-          {/* Pricing cards */}
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-              <div className="text-xs text-slate-400">Public sell price</div>
-              <div className="mt-1 text-lg font-semibold">
-                {Number(d.sellPricePerBrick || 0).toLocaleString()} {STABLE}{" "}
-                <span className="text-xs text-slate-400">/ brick</span>
-              </div>
-              <div className="mt-1 text-sm text-slate-300">
-                {Number(d.ounceSellPrice || 0).toFixed(2)} {STABLE}{" "}
-                <span className="text-xs text-slate-500">/ ounce</span>
-              </div>
-              <p className="mt-2 text-[0.75rem] leading-relaxed text-slate-400">
-                Prices are administered by The Block and may move up over time.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-emerald-500/30 bg-slate-900/70 p-4">
-              <div className="text-xs text-slate-400">Buyback floor</div>
-              <div className="mt-1 text-lg font-semibold text-emerald-300">
-                {Number(d.buybackFloorPerBrick || 0).toLocaleString()} {STABLE}{" "}
-                <span className="text-xs text-slate-400">/ brick</span>
-              </div>
-              <div className="mt-1 text-sm text-emerald-200">
-                {Number(d.ounceBuybackFloor || 0).toFixed(2)} {STABLE}{" "}
-                <span className="text-xs text-emerald-200/70">/ ounce</span>
-              </div>
-              <p className="mt-2 text-[0.75rem] leading-relaxed text-emerald-200/80">
-                Instant buyback as long as the Buyback Vault can cover it.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        {/* Supply / Status row */}
-        <section className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-xs text-slate-400">Total supply</div>
-            <div className="mt-1 text-lg font-semibold">
-              {Number(d.totalBricks || 0).toLocaleString()} bricks{" "}
-              <span className="text-sm text-slate-400">(1 ton)</span>
-            </div>
-            <div className="text-sm text-slate-300">
-              {Number(d.totalOz || 0).toLocaleString()} ounces
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-xs text-slate-400">Locked by The Block</div>
-            <div className="mt-1 text-lg font-semibold">
-              {Number(d.lockedBricks || 0).toLocaleString()} bricks
-            </div>
-            <div className="text-sm text-slate-300">
-              {Number(d.lockedOz || 0).toLocaleString()} ounces
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-xs text-slate-400">In circulation</div>
-            <div className="mt-1 text-lg font-semibold">
-              {Number(d.circulatingBricks || 0).toLocaleString()} bricks
-            </div>
-            <div className="text-sm text-slate-300">
-              {Number(d.circulatingOz || 0).toLocaleString()} ounces
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-xs text-slate-400">Available for distribution</div>
-            <div className="mt-1 text-lg font-semibold">
-              {(Number(d.ouncesRemainingForSale || 0) / Number(d.ouncesPerBrick || 36)).toFixed(0)} bricks
-            </div>
-            <div className="text-sm text-slate-300">
-              {Number(d.ouncesRemainingForSale || 0).toLocaleString()} ounces
-            </div>
-          </div>
-        </section>
-
-        {/* Buy/Sell + Treasury */}
-        <section className="mb-10 grid gap-6 lg:grid-cols-[1.4fr,1fr]">
+        {/* Top grid: Buy/Sell + Vaults/Supply */}
+        <section className="grid gap-6 lg:grid-cols-[1.4fr,1fr]">
           {/* Buy / Sell */}
           <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Early Bird Special: Buy &amp; Sell Bricks
+                Buy / Sell Back (Ounces)
               </h2>
 
-              <div className="flex items-center gap-3">
-                <Link to="/blockswap/early-bird-rules" className="text-xs text-sky-400 hover:underline">
-                  Read Early Bird Rules
-                </Link>
-                <span className="text-xs text-slate-400">Settlement: {STABLE}</span>
-              </div>
-            </div>
-
-            {/* Marketing bullets */}
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-300 space-y-1">
-              <div>• Fixed supply — no dilution</div>
-              <div>• Buyback Vault is funded automatically at the floor on every purchase</div>
-              <div>• Buybacks are paid only from the vault</div>
-              <div>• Sell price and buyback floor can only move up</div>
-              <div>• Transfers are locked during Early Bird</div>
+              <span className="text-xs text-slate-400">
+                1 brick = {ozPerBrick} oz
+              </span>
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">
@@ -418,7 +289,7 @@ export default function BlockSwap() {
 
                   <div>
                     <label className="mb-2 block text-xs text-slate-400">
-                      Ounces (0–35)
+                      Ounces (0–{ozPerBrick - 1})
                     </label>
                     <select
                       value={buyOunces}
@@ -436,10 +307,8 @@ export default function BlockSwap() {
 
                 <div className="mt-3 space-y-1 text-xs text-slate-400">
                   <div className="flex justify-between">
-                    <span>You’re buying</span>
-                    <span className="font-mono text-slate-100">
-                      {buyBricks} brick(s) + {buyOunces} oz ({buyTotalOz} oz)
-                    </span>
+                    <span>Total ounces</span>
+                    <span className="font-mono text-slate-100">{buyTotalOz} oz</span>
                   </div>
                   <div className="flex justify-between">
                     <span>Cost</span>
@@ -464,7 +333,7 @@ export default function BlockSwap() {
                   </p>
                 ) : (
                   <p className="mt-2 text-[0.7rem] text-slate-500">
-                    Transfers are locked during Early Bird.
+                    Demo mode now — contract wiring comes next.
                   </p>
                 )}
               </div>
@@ -472,7 +341,7 @@ export default function BlockSwap() {
               {/* SELLBACK */}
               <div className="rounded-xl border border-emerald-500/30 bg-slate-950/60 p-4">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-300">
-                  Sell Back (Buyback)
+                  Sell Back
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -496,7 +365,7 @@ export default function BlockSwap() {
 
                   <div>
                     <label className="mb-2 block text-xs text-slate-400">
-                      Ounces (0–35)
+                      Ounces (0–{ozPerBrick - 1})
                     </label>
                     <select
                       value={sellOunces}
@@ -514,13 +383,11 @@ export default function BlockSwap() {
 
                 <div className="mt-3 space-y-1 text-xs text-slate-400">
                   <div className="flex justify-between">
-                    <span>You’re selling</span>
-                    <span className="font-mono text-emerald-200">
-                      {sellBricks} brick(s) + {sellOunces} oz ({sellTotalOz} oz)
-                    </span>
+                    <span>Total ounces</span>
+                    <span className="font-mono text-emerald-200">{sellTotalOz} oz</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>You receive (floor)</span>
+                    <span>You receive</span>
                     <span className="font-mono text-emerald-200">
                       {sellProceeds.toFixed(2)} {STABLE}
                     </span>
@@ -537,99 +404,115 @@ export default function BlockSwap() {
                 </button>
 
                 <p className="mt-2 text-[0.7rem] text-emerald-200/80">
-                  Instant buyback if vault can cover.
+                  Pays from the Buyback Vault when wired live.
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Treasury / Activity */}
+          {/* Right side: Vaults + Supply */}
           <div className="space-y-4">
+            {/* Vaults & Contract (balances only) */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Treasury &amp; Distributions
-              </h2>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+                Vaults & Contract
+              </h3>
 
               <dl className="mt-4 space-y-3 text-sm">
                 <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Buyback Vault ({STABLE})</dt>
+                  <dt className="text-slate-400">Buyback Vault</dt>
                   <dd className="text-right font-mono text-emerald-200">
-                    {Number(d.buybackVault || 0).toLocaleString()} {STABLE}
+                    {buybackVault.toLocaleString()} {STABLE}
                     <div className="mt-1 text-xs font-normal text-slate-500">
-                      Funded automatically by the buyback floor on each purchase
+                      Instant capacity: {buybackCapacityOz.toLocaleString()} oz
                     </div>
                   </dd>
                 </div>
 
                 <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">TheBlock ({STABLE})</dt>
+                  <dt className="text-slate-400">TheBlock Treasury</dt>
                   <dd className="text-right font-mono text-sky-300">
-                    {Number(d.theBlockTreasury || 0).toLocaleString()} {STABLE}
+                    {theBlockTreasury.toLocaleString()} {STABLE}
                     <div className="mt-1 text-xs font-normal text-slate-500">
-                      Leftovers = sell price − buyback floor
+                      Ops + growth + milestones
                     </div>
                   </dd>
                 </div>
 
-                <div className="flex items-baseline justify-between gap-4">
-                  <dt className="text-slate-400">Buyback capacity (instant)</dt>
-                  <dd className="text-right font-mono text-emerald-200">
-                    {Number(d.buybackCapacityOz || 0).toLocaleString()} oz
-                  </dd>
-                </div>
-
-                <div className="flex items-baseline justify-between gap-4">
-                  <dt className="text-slate-400">
-                    Profit pool policy (phase {d.phase})
-                  </dt>
-                  <dd className="text-right font-mono text-sky-300">
-                    {Math.round(brickPoolPct * 100)}%
-                  </dd>
-                </div>
-
-                <div className="flex items-baseline justify-between gap-4">
-                  <dt className="text-slate-400">Transfers</dt>
-                  <dd className="text-right font-mono">
-                    {transfersLocked ? "Disabled (Early Bird)" : "Enabled"}
+                <div className="flex items-start justify-between gap-4">
+                  <dt className="text-slate-400">Contract</dt>
+                  <dd className="text-right text-slate-300">
+                    <span className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1 text-xs">
+                      coming soon
+                    </span>
                   </dd>
                 </div>
               </dl>
 
-              <p className="mt-4 text-[0.75rem] leading-relaxed text-slate-400">
-                During Early Bird, transfers are locked. Ownership is tracked by
-                ounces. Distributions use a snapshot rule (whoever holds at the
-                snapshot receives that run).
+              <p className="mt-4 text-[0.75rem] leading-relaxed text-slate-500">
+                We’ll drop the live contract address right here when it’s deployed.
               </p>
             </div>
 
+            {/* Supply */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Recent Activity
-              </h2>
-              <ul className="mt-3 space-y-2 text-xs text-slate-300 max-h-56 overflow-y-auto pr-1">
-                {(d.activity || []).map((item, idx) => (
-                  <li
-                    key={idx}
-                    className="flex items-start justify-between gap-3 rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2"
-                  >
-                    <span className="leading-relaxed">{item.text}</span>
-                    <span className="shrink-0 text-slate-500">{item.ts}</span>
-                  </li>
-                ))}
-              </ul>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+                Supply Snapshot
+              </h3>
+
+              <dl className="mt-4 space-y-3 text-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <dt className="text-slate-400">Total supply</dt>
+                  <dd className="text-right font-mono text-slate-200">
+                    {Number(d.totalBricks || 0).toLocaleString()} bricks
+                    <div className="mt-1 text-xs font-normal text-slate-500">
+                      {Number(d.totalOz || 0).toLocaleString()} ounces total
+                    </div>
+                  </dd>
+                </div>
+
+                <div className="flex items-start justify-between gap-4">
+                  <dt className="text-slate-400">Locked by The Block</dt>
+                  <dd className="text-right font-mono text-slate-200">
+                    {Number(d.lockedBricks || 0).toLocaleString()} bricks
+                    <div className="mt-1 text-xs font-normal text-slate-500">
+                      {Number(d.lockedOz || 0).toLocaleString()} ounces
+                    </div>
+                  </dd>
+                </div>
+
+                <div className="flex items-start justify-between gap-4">
+                  <dt className="text-slate-400">In circulation</dt>
+                  <dd className="text-right font-mono text-slate-200">
+                    {Number(d.circulatingBricks || 0).toLocaleString()} bricks
+                    <div className="mt-1 text-xs font-normal text-slate-500">
+                      {Number(d.circulatingOz || 0).toLocaleString()} ounces
+                    </div>
+                  </dd>
+                </div>
+
+                <div className="flex items-start justify-between gap-4">
+                  <dt className="text-slate-400">Remaining (for sale)</dt>
+                  <dd className="text-right font-mono text-slate-200">
+                    {Number(d.ouncesRemainingForSale || 0).toLocaleString()} oz
+                    <div className="mt-1 text-xs font-normal text-slate-500">
+                      {(Number(d.ouncesRemainingForSale || 0) / ozPerBrick).toFixed(0)} bricks
+                    </div>
+                  </dd>
+                </div>
+              </dl>
             </div>
           </div>
         </section>
 
         {/* Holders */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-              Brick Holders
+              Holders (Weight)
             </h2>
             <span className="text-xs text-slate-400">
-              Total circulating weight:{" "}
-              {Number(d.circulatingOz || 0).toLocaleString()} ounces
+              Circulating weight: {Number(d.circulatingOz || 0).toLocaleString()} oz
             </span>
           </div>
 
@@ -640,12 +523,8 @@ export default function BlockSwap() {
                   <th className="px-3 py-2 font-medium">Holder</th>
                   <th className="px-3 py-2 font-medium">Address</th>
                   <th className="px-3 py-2 font-medium text-right">Weight</th>
-                  <th className="px-3 py-2 font-medium text-right">
-                    % of circulating
-                  </th>
-                  <th className="px-3 py-2 font-medium text-right">
-                    Brick Holder
-                  </th>
+                  <th className="px-3 py-2 font-medium text-right">% of circ</th>
+                  <th className="px-3 py-2 font-medium text-right">36oz+</th>
                 </tr>
               </thead>
               <tbody>
@@ -683,7 +562,7 @@ export default function BlockSwap() {
                 ) : (
                   <tr>
                     <td className="px-3 py-4 text-slate-400" colSpan={5}>
-                      No holders yet. Buy ounces to create the first holder entry.
+                      No holders yet.
                     </td>
                   </tr>
                 )}
@@ -692,16 +571,9 @@ export default function BlockSwap() {
           </div>
 
           <p className="mt-3 text-[0.75rem] text-slate-500">
-            Demo mode persists locally in your browser. On deployment, this table
-            will query chain/indexer for live balances.
+            Demo mode persists locally in your browser. When wired live, this will read on-chain balances.
           </p>
         </section>
-
-        {/* Clean, non-legal-claim disclaimer */}
-        <p className="mt-8 text-xs text-slate-500 text-center">
-          Early-stage system demo. Nothing here is financial advice or a guarantee.
-          Participation is voluntary and subject to the published rules.
-        </p>
 
         {/* refresh button */}
         <div className="mt-6 flex justify-end">
