@@ -77,34 +77,43 @@ const ambienceRef = useRef(null);
 
   const ozPerBrick = d.ouncesPerBrick || 36;
 
-  useEffect(() => {
-  // Create the audio once
+ useEffect(() => {
+  // Create once
   if (!ambienceRef.current) {
-    ambienceRef.current = new Audio("/sounds/swapambience.m4a");
-    ambienceRef.current.loop = true;
-    ambienceRef.current.volume = 0.25; // tweak if you want
+    const a = new Audio("/sounds/swapambience.m4a");
+    a.loop = true;
+    a.volume = 0.25;
+    ambienceRef.current = a;
   }
 
   const a = ambienceRef.current;
 
-  // Respect the master ambient toggle
-  if (isAudioOn) {
+  // helper: try to play, and if blocked, wait for a user gesture
+  const tryPlay = () => {
     a.play().catch(() => {
-      // Browsers may block autoplay until user interaction
-      // This is okay; once they click/tap, it will play.
+      const resume = () => {
+        a.play().catch(() => {});
+        window.removeEventListener("pointerdown", resume);
+        window.removeEventListener("touchstart", resume);
+        window.removeEventListener("click", resume);
+      };
+      window.addEventListener("pointerdown", resume, { once: true });
+      window.addEventListener("touchstart", resume, { once: true });
+      window.addEventListener("click", resume, { once: true });
     });
+  };
+
+  if (isAudioOn) {
+    tryPlay();
   } else {
     a.pause();
-    a.currentTime = 0;
+    // don't reset time here; makes it feel broken on toggle
   }
 
-  // Stop when leaving BlockSwap
   return () => {
     a.pause();
-    a.currentTime = 0;
   };
 }, [isAudioOn]);
-
 
   // Settlement stable symbol
   const STABLE = d.STABLE_SYMBOL || "USDC";
