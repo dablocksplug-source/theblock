@@ -115,10 +115,13 @@ const TheBlock = () => {
         Inside The Hustle
       </button>
 
-      {/* Footer */}
-      <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-[10px] text-slate-500 z-10">
-        Built by <span className="text-cyan-400 font-semibold">TheStreets</span> — Grind. Build. Elevate. © 2025
-      </div>
+    {/* Footer */}
+<div className="mt-12 pb-[calc(env(safe-area-inset-bottom)+12px)] text-center text-[10px] text-slate-500">
+  Built by{" "}
+  <span className="text-cyan-400 font-semibold">TheStreets</span>{" "}
+  — Grind. Build. Elevate. © 2025
+</div>
+
     </div>
   );
 };
