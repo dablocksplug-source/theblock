@@ -17,6 +17,12 @@ function bricksOzFromTotal(totalOz, ozPerBrick) {
   return { b, o };
 }
 
+function clampInt(val, min, max) {
+  const n = Number.isFinite(val) ? val : 0;
+  const i = Math.trunc(n);
+  return Math.max(min, Math.min(max, i));
+}
+
 export default function BlockSwap() {
   const { walletAddress, isConnected, connectWallet } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
@@ -55,7 +61,7 @@ export default function BlockSwap() {
 
   const ozPerBrick = d.ouncesPerBrick || 36;
 
-  // Settlement stable symbol (you can switch to USDC later)
+  // Settlement stable symbol
   const STABLE = d.STABLE_SYMBOL || "USDC";
 
   // ---- Inputs (integers only) ----
@@ -165,7 +171,7 @@ export default function BlockSwap() {
     }
   };
 
-  // Balances (numbers only) — this is what you wanted
+  // Balances (numbers only)
   const buybackVault = Number(d.buybackVault || 0);
   const theBlockTreasury = Number(d.theBlockTreasury || 0);
   const buybackCapacityOz = Number(d.buybackCapacityOz || 0);
@@ -240,22 +246,21 @@ export default function BlockSwap() {
           </div>
         ) : null}
 
-        {/* Admin Panel (shows only for admin wallet) */}
+        {/* Admin Panel */}
         <BlockSwapAdminPanel
           walletAddress={walletAddress}
           d={d}
           onUpdated={(snap) => setD(snap)}
         />
 
-        {/* Top grid: Buy/Sell + Vaults/Supply */}
+        {/* Top grid: Trade + Vaults/Supply */}
         <section className="grid gap-6 lg:grid-cols-[1.4fr,1fr]">
-          {/* Buy / Sell */}
+          {/* Trade */}
           <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Buy / Sell Back (Ounces)
+                Buy
               </h2>
-
               <span className="text-xs text-slate-400">
                 1 brick = {ozPerBrick} oz
               </span>
@@ -277,11 +282,10 @@ export default function BlockSwap() {
                       type="number"
                       min="0"
                       step="1"
+                      inputMode="numeric"
                       value={buyBricks}
                       onChange={(e) =>
-                        setBuyBricks(
-                          Math.max(0, parseInt(e.target.value || "0", 10))
-                        )
+                        setBuyBricks(clampInt(parseInt(e.target.value || "0", 10), 0, 1_000_000))
                       }
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
                     />
@@ -291,17 +295,20 @@ export default function BlockSwap() {
                     <label className="mb-2 block text-xs text-slate-400">
                       Ounces (0–{ozPerBrick - 1})
                     </label>
-                    <select
+                    <input
+                      type="number"
+                      min="0"
+                      max={ozPerBrick - 1}
+                      step="1"
+                      inputMode="numeric"
                       value={buyOunces}
-                      onChange={(e) => setBuyOunces(parseInt(e.target.value, 10))}
+                      onChange={(e) =>
+                        setBuyOunces(
+                          clampInt(parseInt(e.target.value || "0", 10), 0, ozPerBrick - 1)
+                        )
+                      }
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                    >
-                      {Array.from({ length: ozPerBrick }, (_, i) => i).map((n) => (
-                        <option key={n} value={n}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                 </div>
 
@@ -353,11 +360,10 @@ export default function BlockSwap() {
                       type="number"
                       min="0"
                       step="1"
+                      inputMode="numeric"
                       value={sellBricks}
                       onChange={(e) =>
-                        setSellBricks(
-                          Math.max(0, parseInt(e.target.value || "0", 10))
-                        )
+                        setSellBricks(clampInt(parseInt(e.target.value || "0", 10), 0, 1_000_000))
                       }
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
                     />
@@ -367,17 +373,20 @@ export default function BlockSwap() {
                     <label className="mb-2 block text-xs text-slate-400">
                       Ounces (0–{ozPerBrick - 1})
                     </label>
-                    <select
+                    <input
+                      type="number"
+                      min="0"
+                      max={ozPerBrick - 1}
+                      step="1"
+                      inputMode="numeric"
                       value={sellOunces}
-                      onChange={(e) => setSellOunces(parseInt(e.target.value, 10))}
+                      onChange={(e) =>
+                        setSellOunces(
+                          clampInt(parseInt(e.target.value || "0", 10), 0, ozPerBrick - 1)
+                        )
+                      }
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
-                    >
-                      {Array.from({ length: ozPerBrick }, (_, i) => i).map((n) => (
-                        <option key={n} value={n}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                 </div>
 
@@ -501,6 +510,20 @@ export default function BlockSwap() {
                   </dd>
                 </div>
               </dl>
+
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={refresh}
+                  className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-500"
+                  type="button"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <p className="mt-3 text-[0.75rem] text-slate-500">
+                Right now it updates when you Refresh / Buy / Sell / Admin changes. Live mode will be fed by on-chain reads.
+              </p>
             </div>
           </div>
         </section>
@@ -574,17 +597,6 @@ export default function BlockSwap() {
             Demo mode persists locally in your browser. When wired live, this will read on-chain balances.
           </p>
         </section>
-
-        {/* refresh button */}
-        <div className="mt-6 flex justify-end">
-          <button
-            onClick={refresh}
-            className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-500"
-            type="button"
-          >
-            Refresh
-          </button>
-        </div>
       </main>
     </div>
   );
