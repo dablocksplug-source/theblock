@@ -1,6 +1,7 @@
 // src/pages/BlockSwap.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef  } from "react";
 import { Link } from "react-router-dom";
+import { useUI } from "../context/UIContext.jsx";
 
 import { blockswapAdapter } from "../services/blockswapAdapter";
 import BlockSwapAdminPanel from "../components/BlockSwapAdminPanel";
@@ -38,6 +39,10 @@ export default function BlockSwap() {
   const { walletAddress, isConnected, connectWallet } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
 
+  const { isAudioOn } = useUI();
+const ambienceRef = useRef(null);
+
+
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
   const shortAddress = shortAddr(walletAddress);
 
@@ -71,6 +76,35 @@ export default function BlockSwap() {
   }, [walletAddress, d.ADMIN_WALLET]);
 
   const ozPerBrick = d.ouncesPerBrick || 36;
+
+  useEffect(() => {
+  // Create the audio once
+  if (!ambienceRef.current) {
+    ambienceRef.current = new Audio("/sounds/swapambience.m4a");
+    ambienceRef.current.loop = true;
+    ambienceRef.current.volume = 0.25; // tweak if you want
+  }
+
+  const a = ambienceRef.current;
+
+  // Respect the master ambient toggle
+  if (isAudioOn) {
+    a.play().catch(() => {
+      // Browsers may block autoplay until user interaction
+      // This is okay; once they click/tap, it will play.
+    });
+  } else {
+    a.pause();
+    a.currentTime = 0;
+  }
+
+  // Stop when leaving BlockSwap
+  return () => {
+    a.pause();
+    a.currentTime = 0;
+  };
+}, [isAudioOn]);
+
 
   // Settlement stable symbol
   const STABLE = d.STABLE_SYMBOL || "USDC";
