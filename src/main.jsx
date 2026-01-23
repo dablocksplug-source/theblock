@@ -11,7 +11,7 @@ import { WalletProvider } from "./context/WalletContext";
 import NicknameProvider from "./context/NicknameContext";
 import { SoundProvider } from "./context/SoundContext";
 
-// ✅ Single gate for the whole app (driven by presale.config.js)
+// ✅ Gate must live INSIDE router context
 import PresaleGate from "./components/PresaleGate.jsx";
 
 // Pages
@@ -36,11 +36,15 @@ import NicknameTestPage from "./pages/NicknameTestPage.jsx";
 const router = createBrowserRouter([
   {
     path: "/",
-    element: <App />,
+    // ✅ Wrap App here so PresaleGate can use useLocation()
+    element: (
+      <PresaleGate>
+        <App />
+      </PresaleGate>
+    ),
     children: [
       { index: true, element: <TheBlock /> },
 
-      // Districts (will be gated by PresaleGate when PRESALE_MODE=true)
       { path: "blockplay", element: <BlockPlay /> },
       { path: "blockplay/dice", element: <DiceLobby /> },
       { path: "blockplay/dice/:tableId", element: <DiceGame /> },
@@ -54,22 +58,15 @@ const router = createBrowserRouter([
       { path: "blockproof", element: <BlockProof /> },
       { path: "blockshop", element: <BlockShop /> },
 
-      // BlockSwap (allowed)
       { path: "blockswap", element: <BlockSwap /> },
 
-      // Rules page (allowed if allowlisted)
       { path: "blockswap/early-bird-rules", element: <PresaleRules /> },
-
-      // Old URL → redirect to new
       {
         path: "blockswap/presale-rules",
         element: <Navigate to="/blockswap/early-bird-rules" replace />,
       },
 
-      // Old alias routes (will be gated too when PRESALE_MODE=true)
       { path: "dicelobby", element: <DiceLobby /> },
-
-      // Read-only pages (we will allow these in allowlist)
       { path: "lore", element: <Lore /> },
       { path: "investor", element: <InvestorOverview /> },
     ],
@@ -81,9 +78,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <WalletProvider>
       <NicknameProvider>
         <SoundProvider>
-          <PresaleGate>
-            <RouterProvider router={router} />
-          </PresaleGate>
+          <RouterProvider router={router} />
         </SoundProvider>
       </NicknameProvider>
     </WalletProvider>
