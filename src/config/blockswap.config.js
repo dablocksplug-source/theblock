@@ -12,7 +12,7 @@ export const BLOCKSWAP_CONFIG = {
   // locked forever
   BLOCK_LOCKED_BRICKS: 500,
 
-  // offering
+  // offering cap
   BRICKS_AVAILABLE_FOR_SALE: 1500,
 
   // starting prices
@@ -33,7 +33,7 @@ export const BLOCKSWAP_CONFIG = {
   // admin
   ADMIN_WALLET: "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
 
-  // Early Bird (internally still named presale)
-  PRESALE_ACTIVE_DEFAULT: true,
-  TRANSFERS_DISABLED_DURING_PRESALE: true,
+  // ✅ marketing + control defaults
+  EARLY_BIRD_BADGE_DEFAULT: true, // marketing only
+  BUY_PAUSED_DEFAULT: false,      // ONLY buy gate
 };

@@ -1,283 +1,478 @@
-// src/services/blockswapAdapter.mock.js
-import { BLOCKSWAP_CONFIG as C0 } from "../config/blockswap.config";
+// src/services/blockswapAdapter.js
+import { BLOCKSWAP_CONFIG as C } from "../config/blockswap.config";
+import {
+  loadBlockswapState,
+  saveBlockswapState,
+  clearBlockswapState,
+} from "./blockswapStore";
 
-const STORAGE_KEY = "BLOCKSWAP_MOCK_STATE_V1";
-
-const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
-const shortAddr = (a) => (a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—");
-const assert = (cond, msg) => {
-  if (!cond) throw new Error(msg);
-};
-
-function clampInt(n, min, max) {
-  const x = Number.isFinite(n) ? Math.floor(n) : 0;
-  return Math.max(min, Math.min(max, x));
+function nowTag() {
+  return new Date().toLocaleString();
+}
+function nowMs() {
+  return Date.now();
 }
 
-function nowTs() {
-  // simple UI timestamp, local
-  const d = new Date();
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+function clampInt(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.floor(x));
+}
+
+function clampOz(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.floor(x));
+}
+
+function isAdmin(walletAddress) {
+  if (!walletAddress) return false;
+  return (
+    String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET).toLowerCase()
+  );
 }
 
 function defaultState() {
-  return {
-    version: 1,
-    config: deepClone(C0),
-
-   balancesOz: {},
-labels: {},
-
-    activity: [
-  { ts: "Ready", text: `Presale configured • ${C0.BRICKS_AVAILABLE_FOR_SALE} bricks available • Treasury ${C0.stableTreasury} ${C0.STABLE_SYMBOL}` },
-  { ts: "Rule", text: `Transfers locked during presale` },
-  { ts: "Rule", text: `Sellback requires treasury funding` },
-],
-  };
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw);
-
-    // Merge onto defaults to avoid missing fields after updates
-    const base = defaultState();
-    const merged = {
-      ...base,
-      ...parsed,
-      config: { ...base.config, ...(parsed.config || {}) },
-      balancesOz: parsed.balancesOz || base.balancesOz,
-      labels: parsed.labels || base.labels,
-      activity: parsed.activity || base.activity,
-    };
-    return merged;
-  } catch {
-    return defaultState();
-  }
-}
-
-function saveState(state) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // ignore
-  }
-}
-
-// ---- In-memory state (backed by localStorage) ----
-let S = loadState();
-
-function derived(cfg) {
-  const TOTAL_OZ = cfg.TOTAL_BRICKS * cfg.OUNCES_PER_BRICK;
-  const LOCKED_OZ = cfg.BLOCK_LOCKED_BRICKS * cfg.OUNCES_PER_BRICK;
-  const circulatingBricks = cfg.TOTAL_BRICKS - cfg.BLOCK_LOCKED_BRICKS;
-  const circulatingOz = circulatingBricks * cfg.OUNCES_PER_BRICK;
-
-  const ounceSellPrice = cfg.SELL_PRICE_PER_BRICK / cfg.OUNCES_PER_BRICK;
-  const ounceBuybackFloor = cfg.BUYBACK_FLOOR_PER_BRICK / cfg.OUNCES_PER_BRICK;
-
-  const trancheRemaining = Math.max(
-    0,
-    cfg.BRICKS_AVAILABLE_FOR_SALE - cfg.BRICKS_SOLD_SO_FAR
-  );
-
-  const brickPoolPct = cfg.BRICK_POOL_BY_PHASE?.[cfg.PHASE] ?? 0.30;
-
-  const buybackCapacityOz =
-    ounceBuybackFloor > 0 ? Math.floor((cfg.stableTreasury || 0) / ounceBuybackFloor) : 0;
+  const totalOz = C.TOTAL_BRICKS * C.OUNCES_PER_BRICK;
+  const lockedOz = C.BLOCK_LOCKED_BRICKS * C.OUNCES_PER_BRICK;
+  const circulatingBricks = C.TOTAL_BRICKS - C.BLOCK_LOCKED_BRICKS;
+  const circulatingOz = circulatingBricks * C.OUNCES_PER_BRICK;
 
   return {
-    TOTAL_OZ,
-    LOCKED_OZ,
+    // ✅ Early Bird = marketing badge only
+    earlyBirdBadge: !!C.EARLY_BIRD_BADGE_DEFAULT,
+
+    // ✅ ONLY buy gate
+    buyPaused: !!C.BUY_PAUSED_DEFAULT,
+
+    // pricing
+    sellPricePerBrick: C.SELL_PRICE_PER_BRICK,
+    buybackFloorPerBrick: C.BUYBACK_FLOOR_PER_BRICK,
+
+    // Treasuries (stable coin)
+    buybackVault: Number(C.STARTING_TREASURY || 0),
+    theBlockTreasury: 0,
+
+    // supply
+    totalBricks: C.TOTAL_BRICKS,
+    ouncesPerBrick: C.OUNCES_PER_BRICK,
+    totalOz,
+    lockedBricks: C.BLOCK_LOCKED_BRICKS,
+    lockedOz,
     circulatingBricks,
     circulatingOz,
-    ounceSellPrice,
-    ounceBuybackFloor,
-    trancheRemaining,
-    brickPoolPct,
-    buybackCapacityOz,
+
+    // offering cap
+    bricksAvailableForSale: C.BRICKS_AVAILABLE_FOR_SALE,
+    ouncesAvailableForSale: C.BRICKS_AVAILABLE_FOR_SALE * C.OUNCES_PER_BRICK,
+    ouncesSold: 0,
+
+    // phase
+    phase: C.STARTING_PHASE,
+
+    // balances (oz) & labels
+    balancesOz: {},
+    labels: {},
+
+    // ✅ Rewards rounds (claim-based shape for contracts later)
+    // rounds: [{ id, createdAtMs, claimEndMs, totalPoolStable, rewardPerOz, snapshotTotalEligibleOz, snapshotBalancesOz, claimedBy: {addr: true} }]
+    rewardRounds: [],
+
+    // activity log
+    activity: [
+      {
+        ts: "Ready",
+        text: `BlockSwap configured • ${C.BRICKS_AVAILABLE_FOR_SALE} bricks available • BuybackVault ${Number(
+          C.STARTING_TREASURY || 0
+        )} ${C.STABLE_SYMBOL}`,
+      },
+      {
+        ts: "Rule",
+        text: `Buys can be paused by admin. Sellback always allowed if vault has funds.`,
+      },
+      {
+        ts: "Rule",
+        text: `Each buy funds BuybackVault at the floor; leftovers go to TheBlock.`,
+      },
+      {
+        ts: "Rule",
+        text: `Rewards are claim-based and expire after 180 days.`,
+      },
+    ],
   };
 }
 
-function normalizeBricksOunces(cfg, bricks, ounces) {
-  // Ounces: 0..35 only (no decimals)
-  const b = clampInt(Number(bricks || 0), 0, 1_000_000);
-  const o = clampInt(Number(ounces || 0), 0, cfg.OUNCES_PER_BRICK - 1);
-  const totalOz = b * cfg.OUNCES_PER_BRICK + o;
-  return { bricks: b, ounces: o, totalOz };
+function getStateInternal() {
+  const loaded = loadBlockswapState();
+  if (loaded) return loaded;
+  const fresh = defaultState();
+  saveBlockswapState(fresh);
+  return fresh;
 }
 
-function enforcePresale(cfg) {
-  assert(cfg.PRESALE_ACTIVE, "Presale is currently disabled.");
+function setStateInternal(next) {
+  saveBlockswapState(next);
+  return next;
 }
 
-function enforceTransfers(cfg) {
-  assert(cfg.TRANSFERS_ENABLED, "Transfers are disabled during presale.");
+function addActivity(state, text) {
+  return {
+    ...state,
+    activity: [{ ts: nowTag(), text }, ...state.activity].slice(0, 25),
+  };
 }
 
-function buildHolders(cfg) {
-  const d = derived(cfg);
-  const denomOz = d.circulatingOz; // % of circulating supply
-
-  return Object.entries(S.balancesOz)
-    .map(([address, ounces]) => {
-      const label = S.labels[address] || shortAddr(address);
-      const bricksEq = ounces / cfg.OUNCES_PER_BRICK;
-      const pct = denomOz > 0 ? (ounces / denomOz) * 100 : 0;
-      return { address, label, ounces, bricksEq, pctWeightCirculating: pct };
-    })
-    .sort((a, b) => b.ounces - a.ounces);
+function getOuncePrices(state) {
+  return {
+    ounceSellPrice: state.sellPricePerBrick / state.ouncesPerBrick,
+    ounceBuybackFloor: state.buybackFloorPerBrick / state.ouncesPerBrick,
+  };
 }
 
-function pushActivity(text) {
-  S.activity = [{ ts: nowTs(), text }, ...S.activity].slice(0, 50);
-  saveState(S);
+function getBrickPoolPct(state) {
+  return C.BRICK_POOL_BY_PHASE?.[state.phase] ?? 0.30;
 }
 
-function isAdmin(caller) {
-  if (!caller) return false;
-  const a = String(caller).toLowerCase();
-  const admin = String(S.config.ADMIN_WALLET || "").toLowerCase();
-  return a === admin;
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
 }
 
-function sanitizeAdminConfig(cfg) {
-  // Hard safety rule: if presale active, transfers must be disabled
-  if (cfg.PRESALE_ACTIVE) cfg.TRANSFERS_ENABLED = false;
+function makeSnapshot(state) {
+  const balances = state.balancesOz || {};
+  const snapshotBalancesOz = deepClone(balances);
 
-  // Clamp important fields
-  cfg.TOTAL_BRICKS = clampInt(Number(cfg.TOTAL_BRICKS || 0), 1, 10_000_000);
-  cfg.OUNCES_PER_BRICK = clampInt(Number(cfg.OUNCES_PER_BRICK || 0), 1, 10_000);
+  const snapshotTotalEligibleOz = Object.values(snapshotBalancesOz).reduce(
+    (sum, v) => sum + Number(v || 0),
+    0
+  );
 
-  cfg.BLOCK_LOCKED_BRICKS = clampInt(Number(cfg.BLOCK_LOCKED_BRICKS || 0), 0, cfg.TOTAL_BRICKS);
-  cfg.BRICKS_AVAILABLE_FOR_SALE = clampInt(Number(cfg.BRICKS_AVAILABLE_FOR_SALE || 0), 0, cfg.TOTAL_BRICKS);
-  cfg.BRICKS_SOLD_SO_FAR = clampInt(Number(cfg.BRICKS_SOLD_SO_FAR || 0), 0, cfg.BRICKS_AVAILABLE_FOR_SALE);
-
-  cfg.SELL_PRICE_PER_BRICK = Math.max(0, Number(cfg.SELL_PRICE_PER_BRICK || 0));
-  cfg.BUYBACK_FLOOR_PER_BRICK = Math.max(0, Number(cfg.BUYBACK_FLOOR_PER_BRICK || 0));
-  cfg.stableTreasury = Math.max(0, Number(cfg.stableTreasury || 0));
-
-  cfg.PHASE = clampInt(Number(cfg.PHASE || 1), 1, 3);
-
-  return cfg;
+  return { snapshotBalancesOz, snapshotTotalEligibleOz };
 }
 
-export const blockswapMock = {
-  async getState() {
-    const cfg = S.config;
+// ===== public API =====
+export const blockswapAdapter = {
+  // read-only derived snapshot for UI
+  getSnapshot() {
+    const s = getStateInternal();
+    const { ounceSellPrice, ounceBuybackFloor } = getOuncePrices(s);
+
+    const brickPoolPct = getBrickPoolPct(s);
+
+    const buybackCapacityOz = Math.floor(
+      (Number(s.buybackVault || 0) / s.buybackFloorPerBrick) * s.ouncesPerBrick
+    );
+
     return {
-      config: deepClone(cfg),
-      derived: derived(cfg),
-      holders: buildHolders(cfg),
-      activity: deepClone(S.activity),
+      ...s,
+      STABLE_SYMBOL: C.STABLE_SYMBOL,
+      ADMIN_WALLET: C.ADMIN_WALLET,
+
+      brickPoolPct,
+      ounceSellPrice,
+      ounceBuybackFloor,
+      buybackCapacityOz,
+      ouncesRemainingForSale: Math.max(0, s.ouncesAvailableForSale - s.ouncesSold),
+      bricksSoldEq: s.ouncesSold / s.ouncesPerBrick,
     };
   },
 
-  async buy({ address, bricks, ounces }) {
-    const cfg = S.config;
-    enforcePresale(cfg);
-    assert(address, "Connect wallet first.");
+  // ===== user actions =====
+  buy({ walletAddress, ounces, label }) {
+    const s = getStateInternal();
 
-    const n = normalizeBricksOunces(cfg, bricks, ounces);
-    assert(n.totalOz > 0, "Enter bricks and/or ounces.");
+    if (s.buyPaused) throw new Error("Buys are paused right now.");
+    if (!walletAddress) throw new Error("Connect wallet to buy.");
 
-    // Tranche enforcement: count whole bricks only
-    const bricksBuying = Math.floor(n.totalOz / cfg.OUNCES_PER_BRICK);
-    if (bricksBuying > 0) {
-      const remaining = Math.max(
-        0,
-        cfg.BRICKS_AVAILABLE_FOR_SALE - cfg.BRICKS_SOLD_SO_FAR
-      );
-      assert(bricksBuying <= remaining, "Not enough bricks remaining in this launch tranche.");
-      cfg.BRICKS_SOLD_SO_FAR += bricksBuying;
+    const oz = clampOz(ounces);
+    if (oz <= 0) throw new Error("Enter an ounce amount (must be at least 1 oz).");
+    if (s.ouncesSold + oz > s.ouncesAvailableForSale) {
+      throw new Error("Not enough ounces remaining for sale.");
     }
 
-    S.balancesOz[address] = (S.balancesOz[address] || 0) + n.totalOz;
+    const { ounceSellPrice, ounceBuybackFloor } = getOuncePrices(s);
 
-    // if no label exists, default to short wallet for mock
-    if (!S.labels[address]) S.labels[address] = shortAddr(address);
+    // floor goes to BuybackVault, leftovers to TheBlock
+    const floorIn = oz * ounceBuybackFloor;
+    const totalIn = oz * ounceSellPrice;
+    const theBlockIn = Math.max(0, totalIn - floorIn);
 
-    sanitizeAdminConfig(cfg); // keep invariants
-    saveState(S);
+    const addr = String(walletAddress).toLowerCase();
+    const prev = s.balancesOz[addr] ?? 0;
 
-    const d = derived(cfg);
-    const cost = n.totalOz * d.ounceSellPrice;
+    // label rules: set only if empty
+    const nextLabels = { ...(s.labels || {}) };
+    const incomingLabel = (label || "").trim();
+    const existingLabel = (nextLabels[addr] || "").trim();
+    if (incomingLabel && !existingLabel) nextLabels[addr] = incomingLabel;
 
-    pushActivity(
-      `BUY — ${n.bricks} brick(s) + ${n.ounces} oz (${n.totalOz} oz) • ${cost.toFixed(2)} ${cfg.STABLE_SYMBOL}`
+    const next = {
+      ...s,
+      ouncesSold: s.ouncesSold + oz,
+      balancesOz: { ...s.balancesOz, [addr]: prev + oz },
+      labels: nextLabels,
+
+      buybackVault: Number(s.buybackVault || 0) + floorIn,
+      theBlockTreasury: Number(s.theBlockTreasury || 0) + theBlockIn,
+    };
+
+    const prettyBricks = (oz / s.ouncesPerBrick).toFixed(4);
+
+    const next2 = addActivity(
+      next,
+      `Buy ${oz} oz (${prettyBricks} brick eq) • Paid ${totalIn.toFixed(2)} ${
+        C.STABLE_SYMBOL
+      } → Vault +${floorIn.toFixed(2)} / TheBlock +${theBlockIn.toFixed(2)}`
     );
 
-    return this.getState();
+    setStateInternal(next2);
+    return this.getSnapshot();
   },
 
-  async sellBack({ address, bricks, ounces }) {
-    const cfg = S.config;
-    enforcePresale(cfg);
-    assert(address, "Connect wallet first.");
+  sellBack({ walletAddress, ounces }) {
+    const s = getStateInternal();
+    if (!walletAddress) throw new Error("Connect wallet to sell back.");
 
-    const n = normalizeBricksOunces(cfg, bricks, ounces);
-    assert(n.totalOz > 0, "Enter bricks and/or ounces.");
+    const oz = clampOz(ounces);
+    if (oz <= 0) throw new Error("Enter an ounce amount to sell back.");
 
-    const bal = S.balancesOz[address] || 0;
-    assert(bal >= n.totalOz, "You don't have enough ounces to sell back.");
+    const addr = String(walletAddress).toLowerCase();
+    const owned = s.balancesOz[addr] ?? 0;
+    if (oz > owned) throw new Error("You don’t have that many ounces.");
 
-    const d = derived(cfg);
-    const proceeds = n.totalOz * d.ounceBuybackFloor;
+    const { ounceBuybackFloor } = getOuncePrices(s);
+    const proceeds = oz * ounceBuybackFloor;
 
-    assert(cfg.stableTreasury >= proceeds, "Treasury too low for instant buyback right now.");
-    cfg.stableTreasury -= proceeds;
+    if (proceeds > Number(s.buybackVault || 0)) {
+      throw new Error("BuybackVault too low for instant buyback right now.");
+    }
 
-    S.balancesOz[address] = bal - n.totalOz;
+    const nextOwned = owned - oz;
 
-    sanitizeAdminConfig(cfg);
-    saveState(S);
+    const next = {
+      ...s,
+      buybackVault: Number(s.buybackVault || 0) - proceeds,
+      balancesOz: { ...s.balancesOz, [addr]: nextOwned },
+    };
 
-    pushActivity(
-      `SELLBACK — ${n.bricks} brick(s) + ${n.ounces} oz (${n.totalOz} oz) • ${proceeds.toFixed(2)} ${cfg.STABLE_SYMBOL}`
+    const prettyBricks = (oz / s.ouncesPerBrick).toFixed(4);
+    const next2 = addActivity(
+      next,
+      `Sell back ${oz} oz (${prettyBricks} brick eq) • Receive ${proceeds.toFixed(
+        2
+      )} ${C.STABLE_SYMBOL} from Vault`
     );
 
-    return this.getState();
+    setStateInternal(next2);
+    return this.getSnapshot();
   },
 
-  async transfer({ from, to, bricks, ounces }) {
-    const cfg = S.config;
-    enforceTransfers(cfg); // always blocked during presale
-    assert(from && to, "Missing from/to.");
+  setLabel({ walletAddress, label }) {
+    const s = getStateInternal();
+    if (!walletAddress) throw new Error("Connect wallet first.");
 
-    const n = normalizeBricksOunces(cfg, bricks, ounces);
-    assert(n.totalOz > 0, "Enter bricks and/or ounces.");
+    const addr = String(walletAddress).toLowerCase();
+    const next = {
+      ...s,
+      labels: { ...s.labels, [addr]: String(label || "").trim() },
+    };
 
-    const bal = S.balancesOz[from] || 0;
-    assert(bal >= n.totalOz, "Insufficient balance.");
-
-    S.balancesOz[from] = bal - n.totalOz;
-    S.balancesOz[to] = (S.balancesOz[to] || 0) + n.totalOz;
-
-    saveState(S);
-    pushActivity(`TRANSFER — ${n.totalOz} oz • ${shortAddr(from)} → ${shortAddr(to)}`);
-    return this.getState();
+    setStateInternal(next);
+    return this.getSnapshot();
   },
 
-  // ---------- ADMIN ----------
-  async adminSetConfig({ caller, patch }) {
-    assert(isAdmin(caller), "Admin only.");
-    assert(patch && typeof patch === "object", "Invalid patch.");
+  // ===== admin actions =====
 
-    S.config = sanitizeAdminConfig({ ...S.config, ...patch });
-    saveState(S);
-    pushActivity(`ADMIN — Updated presale settings`);
-    return this.getState();
+  // marketing only
+  adminSetEarlyBirdBadge({ walletAddress, enabled }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const next = addActivity(
+      { ...s, earlyBirdBadge: !!enabled },
+      `Admin: Early Bird badge ${enabled ? "ON" : "OFF"} (marketing)`
+    );
+    setStateInternal(next);
+    return this.getSnapshot();
   },
 
-  async adminReset({ caller }) {
-    assert(isAdmin(caller), "Admin only.");
-    S = defaultState();
-    saveState(S);
-    pushActivity(`ADMIN — Reset demo state`);
-    return this.getState();
+  // the ONLY buy gate
+  adminSetBuyPaused({ walletAddress, paused }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const next = addActivity(
+      { ...s, buyPaused: !!paused },
+      `Admin: Buys ${paused ? "PAUSED" : "RESUMED"}`
+    );
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminFundTreasury({ walletAddress, amountStable }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const amt = Number(amountStable);
+    if (!Number.isFinite(amt) || amt <= 0) throw new Error("Enter a positive amount.");
+
+    const next = addActivity(
+      { ...s, buybackVault: Number(s.buybackVault || 0) + amt },
+      `Admin: BuybackVault funded +${amt.toFixed(2)} ${C.STABLE_SYMBOL}`
+    );
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminMoveToBuybackVault({ walletAddress, amountStable }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const amt = Number(amountStable);
+    if (!Number.isFinite(amt) || amt <= 0) throw new Error("Enter a positive amount.");
+
+    const curBlock = Number(s.theBlockTreasury || 0);
+    if (amt > curBlock) throw new Error("TheBlock treasury too low for that move.");
+
+    const next = addActivity(
+      {
+        ...s,
+        theBlockTreasury: curBlock - amt,
+        buybackVault: Number(s.buybackVault || 0) + amt,
+      },
+      `Admin: moved ${amt.toFixed(2)} ${C.STABLE_SYMBOL} from TheBlock → BuybackVault`
+    );
+
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminSetPrices({ walletAddress, sellPricePerBrick, buybackFloorPerBrick }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const nextSell = Number(sellPricePerBrick);
+    const nextFloor = Number(buybackFloorPerBrick);
+
+    if (!Number.isFinite(nextSell) || nextSell <= 0) throw new Error("Invalid sell price.");
+    if (!Number.isFinite(nextFloor) || nextFloor <= 0) throw new Error("Invalid buyback floor.");
+
+    if (nextSell < s.sellPricePerBrick) throw new Error("Sell price can only increase.");
+    if (nextFloor < s.buybackFloorPerBrick) throw new Error("Buyback floor can only increase.");
+    if (nextSell < nextFloor) throw new Error("Sell price must be ≥ buyback floor.");
+
+    const next = addActivity(
+      { ...s, sellPricePerBrick: nextSell, buybackFloorPerBrick: nextFloor },
+      `Admin: prices updated • Sell ${nextSell} / Buyback ${nextFloor} ${C.STABLE_SYMBOL} per brick`
+    );
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminAdvancePhase({ walletAddress, phase }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const p = clampInt(phase);
+    if (![1, 2, 3].includes(p)) throw new Error("Phase must be 1, 2, or 3.");
+
+    const next = addActivity({ ...s, phase: p }, `Admin: phase set to ${p}`);
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  // ✅ rewards + export
+  adminExportStateJSON({ walletAddress }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+    return JSON.stringify(this.getSnapshot(), null, 2);
+  },
+
+  adminGetHoldersSnapshot({ walletAddress }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+    const snap = makeSnapshot(s);
+    return { ...snap, ts: nowTag(), atMs: nowMs(), stable: C.STABLE_SYMBOL };
+  },
+
+  // Create a claim round (180 days)
+  adminCreateRewardRound({ walletAddress, poolStable }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const pool = Number(poolStable);
+    if (!Number.isFinite(pool) || pool <= 0) throw new Error("Enter a positive reward pool amount.");
+
+    const { snapshotBalancesOz, snapshotTotalEligibleOz } = makeSnapshot(s);
+    if (snapshotTotalEligibleOz <= 0) throw new Error("No eligible holders (0 oz total).");
+
+    const rewardPerOz = pool / snapshotTotalEligibleOz;
+
+    const createdAtMs = nowMs();
+    const claimEndMs = createdAtMs + 180 * 24 * 60 * 60 * 1000; // 180 days
+    const id = `${createdAtMs}`;
+
+    const round = {
+      id,
+      createdAtMs,
+      claimEndMs,
+      totalPoolStable: pool,
+      rewardPerOz,
+      snapshotTotalEligibleOz,
+      snapshotBalancesOz,
+      claimedBy: {},
+      stableSymbol: C.STABLE_SYMBOL,
+    };
+
+    const next = addActivity(
+      { ...s, rewardRounds: [round, ...(s.rewardRounds || [])] },
+      `Admin: Reward round ${id} created • Pool ${pool.toFixed(2)} ${
+        C.STABLE_SYMBOL
+      } • ${rewardPerOz.toFixed(6)} ${C.STABLE_SYMBOL}/oz • Claim window 180d`
+    );
+
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  // demo-only claim (contract later = Merkle claim)
+  claimReward({ walletAddress, roundId }) {
+    const s = getStateInternal();
+    if (!walletAddress) throw new Error("Connect wallet to claim.");
+
+    const addr = String(walletAddress).toLowerCase();
+    const rounds = Array.isArray(s.rewardRounds) ? s.rewardRounds : [];
+    const r = rounds.find((x) => String(x.id) === String(roundId));
+    if (!r) throw new Error("Reward round not found.");
+
+    if (nowMs() > Number(r.claimEndMs || 0)) throw new Error("Claim window ended.");
+    if (r.claimedBy?.[addr]) throw new Error("Already claimed.");
+
+    const oz = Number(r.snapshotBalancesOz?.[addr] || 0);
+    if (oz <= 0) throw new Error("No eligible ounces in snapshot.");
+
+    const claimAmt = oz * Number(r.rewardPerOz || 0);
+
+    const nextRounds = rounds.map((x) => {
+      if (String(x.id) !== String(roundId)) return x;
+      return { ...x, claimedBy: { ...(x.claimedBy || {}), [addr]: true } };
+    });
+
+    const next = addActivity(
+      { ...s, rewardRounds: nextRounds },
+      `Claim: ${addr.slice(0, 6)}… claimed ${claimAmt.toFixed(2)} ${
+        C.STABLE_SYMBOL
+      } from round ${roundId}`
+    );
+
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminReset({ walletAddress }) {
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+    clearBlockswapState();
+    const fresh = defaultState();
+    setStateInternal(fresh);
+    return this.getSnapshot();
   },
 };

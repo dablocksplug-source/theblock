@@ -29,6 +29,15 @@ function isAdmin(walletAddress) {
   );
 }
 
+function addDaysMs(days) {
+  return days * 24 * 60 * 60 * 1000;
+}
+
+function getEligibleTotalOz(state) {
+  const balances = state.balancesOz || {};
+  return Object.values(balances).reduce((sum, v) => sum + (Number(v) || 0), 0);
+}
+
 function defaultState() {
   const totalOz = C.TOTAL_BRICKS * C.OUNCES_PER_BRICK;
   const lockedOz = C.BLOCK_LOCKED_BRICKS * C.OUNCES_PER_BRICK;
@@ -36,9 +45,9 @@ function defaultState() {
   const circulatingOz = circulatingBricks * C.OUNCES_PER_BRICK;
 
   return {
-    // (Internally named presale; UI calls it Early Bird)
-    presaleActive: C.PRESALE_ACTIVE_DEFAULT,
-    transfersDisabledDuringPresale: C.TRANSFERS_DISABLED_DURING_PRESALE,
+    // marketing + sale controls
+    earlyBirdBadge: true, // marketing badge only
+    buyPaused: false, // REAL buy gate
 
     // pricing
     sellPricePerBrick: C.SELL_PRICE_PER_BRICK,
@@ -69,15 +78,19 @@ function defaultState() {
     balancesOz: {},
     labels: {},
 
+    // rewards (demo-mode)
+    rewardRounds: [],
+    rewardClaims: {}, // { [roundId]: { [addrLower]: true } }
+
     // activity log
     activity: [
       {
         ts: "Ready",
-        text: `Early Bird configured • ${C.BRICKS_AVAILABLE_FOR_SALE} bricks available • BuybackVault ${Number(
+        text: `BlockSwap configured • ${C.BRICKS_AVAILABLE_FOR_SALE} bricks available • BuybackVault ${Number(
           C.STARTING_TREASURY || 0
         )} ${C.STABLE_SYMBOL}`,
       },
-      { ts: "Rule", text: `Transfers locked during Early Bird` },
+      { ts: "Rule", text: `Buys can be paused by Admin` },
       {
         ts: "Rule",
         text: `Every buy funds BuybackVault at the floor; leftovers go to TheBlock`,
@@ -103,7 +116,7 @@ function setStateInternal(next) {
 function addActivity(state, text) {
   return {
     ...state,
-    activity: [{ ts: nowTag(), text }, ...state.activity].slice(0, 25),
+    activity: [{ ts: nowTag(), text }, ...(state.activity || [])].slice(0, 25),
   };
 }
 
@@ -136,6 +149,9 @@ export const blockswapAdapter = {
       STABLE_SYMBOL: C.STABLE_SYMBOL,
       ADMIN_WALLET: C.ADMIN_WALLET,
 
+      // keep the old flag name alive for UI compatibility
+      presaleActive: !!s.earlyBirdBadge,
+
       brickPoolPct,
       ounceSellPrice,
       ounceBuybackFloor,
@@ -148,13 +164,15 @@ export const blockswapAdapter = {
   // ===== user actions =====
   buy({ walletAddress, ounces, label }) {
     const s = getStateInternal();
-    if (!s.presaleActive) throw new Error("Early Bird is disabled.");
+
+    // REAL gate
+    if (s.buyPaused) throw new Error("Buys are currently paused.");
     if (!walletAddress) throw new Error("Connect wallet to buy.");
 
     const oz = clampOz(ounces);
     if (oz <= 0) throw new Error("Enter an ounce amount (must be at least 1 oz).");
     if (s.ouncesSold + oz > s.ouncesAvailableForSale) {
-      throw new Error("Not enough ounces remaining in this Early Bird.");
+      throw new Error("Not enough ounces remaining for sale.");
     }
 
     const { ounceSellPrice, ounceBuybackFloor } = getOuncePrices(s);
@@ -237,7 +255,6 @@ export const blockswapAdapter = {
     return this.getSnapshot();
   },
 
-  // user label setter (optional helper)
   setLabel({ walletAddress, label }) {
     const s = getStateInternal();
     if (!walletAddress) throw new Error("Connect wallet first.");
@@ -253,13 +270,25 @@ export const blockswapAdapter = {
   },
 
   // ===== admin actions =====
-  adminTogglePresale({ walletAddress, enabled }) {
+  adminSetEarlyBirdBadge({ walletAddress, enabled }) {
     const s = getStateInternal();
     if (!isAdmin(walletAddress)) throw new Error("Admin only.");
 
     const next = addActivity(
-      { ...s, presaleActive: !!enabled },
-      `Admin: Early Bird ${enabled ? "ENABLED" : "DISABLED"}`
+      { ...s, earlyBirdBadge: !!enabled },
+      `Admin: Early Bird badge ${enabled ? "ON" : "OFF"} (marketing)`
+    );
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminSetBuyPaused({ walletAddress, paused }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const next = addActivity(
+      { ...s, buyPaused: !!paused },
+      `Admin: buys ${paused ? "PAUSED" : "LIVE"}`
     );
     setStateInternal(next);
     return this.getSnapshot();
@@ -314,10 +343,12 @@ export const blockswapAdapter = {
     const nextFloor = Number(buybackFloorPerBrick);
 
     if (!Number.isFinite(nextSell) || nextSell <= 0) throw new Error("Invalid sell price.");
-    if (!Number.isFinite(nextFloor) || nextFloor <= 0) throw new Error("Invalid buyback floor.");
+    if (!Number.isFinite(nextFloor) || nextFloor <= 0)
+      throw new Error("Invalid buyback floor.");
 
     if (nextSell < s.sellPricePerBrick) throw new Error("Sell price can only increase.");
-    if (nextFloor < s.buybackFloorPerBrick) throw new Error("Buyback floor can only increase.");
+    if (nextFloor < s.buybackFloorPerBrick)
+      throw new Error("Buyback floor can only increase.");
     if (nextSell < nextFloor) throw new Error("Sell price must be ≥ buyback floor.");
 
     const next = addActivity(
@@ -338,6 +369,97 @@ export const blockswapAdapter = {
     const next = addActivity({ ...s, phase: p }, `Admin: phase set to ${p}`);
     setStateInternal(next);
     return this.getSnapshot();
+  },
+
+  adminCreateRewardRound({ walletAddress, poolStable }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+
+    const pool = Number(poolStable);
+    if (!Number.isFinite(pool) || pool <= 0) throw new Error("Enter a positive pool amount.");
+
+    const snapshotTotalEligibleOz = getEligibleTotalOz(s);
+    if (snapshotTotalEligibleOz <= 0) throw new Error("No eligible holders yet.");
+
+    const rewardPerOz = pool / snapshotTotalEligibleOz;
+
+    const id = `R${Date.now()}`;
+    const claimStartMs = Date.now();
+    const claimEndMs = claimStartMs + addDaysMs(180);
+
+    const round = {
+      id,
+      totalPoolStable: pool,
+      rewardPerOz,
+      snapshotTotalEligibleOz,
+      claimStartMs,
+      claimEndMs,
+      snapshotBalancesOz: { ...(s.balancesOz || {}) },
+    };
+
+    const next = addActivity(
+      {
+        ...s,
+        rewardRounds: [round, ...(s.rewardRounds || [])],
+      },
+      `Admin: reward round ${id} • Pool ${pool.toFixed(2)} ${C.STABLE_SYMBOL} • Per oz ${rewardPerOz.toFixed(
+        6
+      )} • Claim until ${new Date(claimEndMs).toLocaleDateString()}`
+    );
+
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  claimReward({ walletAddress, roundId }) {
+    const s = getStateInternal();
+    if (!walletAddress) throw new Error("Connect wallet to claim.");
+
+    const rid = String(roundId || "").trim();
+    if (!rid) throw new Error("Missing reward round.");
+
+    const rounds = Array.isArray(s.rewardRounds) ? s.rewardRounds : [];
+    const round = rounds.find((r) => r.id === rid);
+    if (!round) throw new Error("Reward round not found.");
+
+    const now = Date.now();
+    if (now > Number(round.claimEndMs || 0)) throw new Error("Claim window ended.");
+
+    const addr = String(walletAddress).toLowerCase();
+
+    const claimsByRound = { ...(s.rewardClaims || {}) };
+    const claimedMap = { ...(claimsByRound[rid] || {}) };
+
+    if (claimedMap[addr]) throw new Error("Already claimed this round.");
+
+    const userOz = Number(round.snapshotBalancesOz?.[addr] || 0);
+    if (userOz <= 0) throw new Error("No eligible ounces in this snapshot.");
+
+    const payout = userOz * Number(round.rewardPerOz || 0);
+    if (payout <= 0) throw new Error("Nothing to claim.");
+
+    claimedMap[addr] = true;
+    claimsByRound[rid] = claimedMap;
+
+    const next = addActivity(
+      {
+        ...s,
+        rewardClaims: claimsByRound,
+      },
+      `Claim: ${addr.slice(0, 6)}... claimed ${payout.toFixed(2)} ${
+        C.STABLE_SYMBOL
+      } from ${rid} (${userOz} oz @ ${Number(round.rewardPerOz).toFixed(6)})`
+    );
+
+    setStateInternal(next);
+    return this.getSnapshot();
+  },
+
+  adminExportStateJSON({ walletAddress }) {
+    const s = getStateInternal();
+    if (!isAdmin(walletAddress)) throw new Error("Admin only.");
+    // export the raw state + snapshot fields are reconstructable anyway
+    return JSON.stringify(s, null, 2);
   },
 
   adminReset({ walletAddress }) {

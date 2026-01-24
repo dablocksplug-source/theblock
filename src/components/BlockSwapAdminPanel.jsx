@@ -1,5 +1,5 @@
 // src/components/BlockSwapAdminPanel.jsx
-import React, { useMemo, useEffect, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
@@ -7,8 +7,12 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
   const [floor, setFloor] = useState(String(d.buybackFloorPerBrick ?? 0));
   const [fund, setFund] = useState("");
   const [phase, setPhase] = useState(String(d.phase ?? 1));
-  const [err, setErr] = useState("");
+  const [rewardPool, setRewardPool] = useState("");
 
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+
+  // keep inputs in sync when snapshot updates
   useEffect(() => {
     setSell(String(d.sellPricePerBrick ?? 0));
     setFloor(String(d.buybackFloorPerBrick ?? 0));
@@ -28,6 +32,7 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
   const act = (fn) => {
     try {
       setErr("");
+      setMsg("");
       const snap = fn();
       onUpdated?.(snap);
     } catch (e) {
@@ -35,8 +40,8 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
     }
   };
 
-  // ✅ Locked settlement: always USDC for The Block
-  const STABLE = "USDC";
+  // settlement (locked for you, but read from snapshot to stay consistent)
+  const STABLE = d.STABLE_SYMBOL || "USDC";
 
   const short = (a) =>
     a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
@@ -47,7 +52,9 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
         <div className="text-sm font-semibold uppercase tracking-wide text-amber-200">
           Admin Panel
         </div>
-        <div className="text-xs text-amber-200/80">Admin: {short(d.ADMIN_WALLET)}</div>
+        <div className="text-xs text-amber-200/80">
+          Admin: {short(d.ADMIN_WALLET)}
+        </div>
       </div>
 
       {err ? (
@@ -56,40 +63,58 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
         </div>
       ) : null}
 
+      {msg ? (
+        <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+          {msg}
+        </div>
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Early Bird toggle (internally presale) */}
+        {/* Marketing + Pause Buys */}
         <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-          <div className="text-xs text-slate-400">Early Bird Special</div>
+          <div className="text-xs text-slate-400">Controls</div>
 
           <div className="mt-2 flex flex-wrap gap-2">
+            {/* Early Bird badge (marketing only) */}
             <button
               type="button"
               onClick={() =>
                 act(() =>
-                  blockswapAdapter.adminTogglePresale({
+                  blockswapAdapter.adminSetEarlyBirdBadge({
                     walletAddress,
-                    enabled: true,
+                    enabled: !d.earlyBirdBadge,
                   })
                 )
               }
-              className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+              className={
+                "rounded-lg px-3 py-2 text-xs font-semibold " +
+                (d.earlyBirdBadge
+                  ? "bg-sky-500 text-slate-950 hover:bg-sky-400"
+                  : "border border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-500")
+              }
             >
-              Enable
+              Early Bird Badge: {d.earlyBirdBadge ? "ON" : "OFF"}
             </button>
 
+            {/* Pause Buys (real gate) */}
             <button
               type="button"
               onClick={() =>
                 act(() =>
-                  blockswapAdapter.adminTogglePresale({
+                  blockswapAdapter.adminSetBuyPaused({
                     walletAddress,
-                    enabled: false,
+                    paused: !d.buyPaused,
                   })
                 )
               }
-              className="rounded-lg bg-rose-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-rose-400"
+              className={
+                "rounded-lg px-3 py-2 text-xs font-semibold " +
+                (d.buyPaused
+                  ? "bg-rose-500 text-slate-950 hover:bg-rose-400"
+                  : "bg-emerald-500 text-slate-950 hover:bg-emerald-400")
+              }
             >
-              Disable
+              Buys: {d.buyPaused ? "PAUSED" : "LIVE"}
             </button>
 
             <button
@@ -102,7 +127,7 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
           </div>
 
           <div className="mt-2 text-[0.75rem] text-slate-400">
-            Transfers locked during Early Bird: <span className="text-slate-200">Yes</span>
+            Early Bird is marketing only. Buys are controlled by the Pause button.
           </div>
         </div>
 
@@ -245,9 +270,7 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
             <button
               type="button"
               onClick={() =>
-                act(() =>
-                  blockswapAdapter.adminAdvancePhase({ walletAddress, phase })
-                )
+                act(() => blockswapAdapter.adminAdvancePhase({ walletAddress, phase }))
               }
               className="shrink-0 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300"
             >
@@ -258,6 +281,106 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
           <div className="mt-2 text-[0.75rem] text-slate-400">
             Current phase: <span className="text-slate-100">{d.phase}</span>
           </div>
+        </div>
+
+        {/* Rewards */}
+        <div className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+          <div className="text-xs text-slate-400">Rewards (claim-only, 180 days)</div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <input
+              value={rewardPool}
+              onChange={(e) => setRewardPool(e.target.value)}
+              placeholder={`Reward pool in ${STABLE} (ex: 100)`}
+              className="w-64 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
+            />
+
+            <button
+              type="button"
+              onClick={() => {
+                act(() =>
+                  blockswapAdapter.adminCreateRewardRound({
+                    walletAddress,
+                    poolStable: rewardPool,
+                  })
+                );
+                setRewardPool("");
+              }}
+              className="rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-400"
+            >
+              Create Reward Round
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  setErr("");
+                  setMsg("");
+                  const json = blockswapAdapter.adminExportStateJSON({ walletAddress });
+
+                  const tryClipboard = navigator.clipboard?.writeText
+                    ? navigator.clipboard.writeText(json)
+                    : Promise.reject(new Error("Clipboard not available"));
+
+                  tryClipboard
+                    .then(() => setMsg("Snapshot copied to clipboard ✅"))
+                    .catch(() => {
+                      window.prompt("Copy Snapshot JSON:", json);
+                      setMsg("Snapshot opened for manual copy ✅");
+                    });
+                } catch (e) {
+                  setErr(e?.message || "Export failed.");
+                }
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500"
+            >
+              Copy Snapshot JSON
+            </button>
+          </div>
+
+          <div className="mt-2 text-[0.75rem] text-slate-500">
+            Contract version will be Merkle claim. This locks in the same round fields now.
+          </div>
+
+          {Array.isArray(d.rewardRounds) && d.rewardRounds.length ? (
+            <div className="mt-3 overflow-x-auto">
+              <table className="min-w-full text-left text-xs">
+                <thead className="border-b border-slate-800 text-slate-400">
+                  <tr>
+                    <th className="py-2 pr-3">Round</th>
+                    <th className="py-2 pr-3 text-right">Pool</th>
+                    <th className="py-2 pr-3 text-right">Per Oz</th>
+                    <th className="py-2 pr-3 text-right">Eligible Oz</th>
+                    <th className="py-2 pr-3">Claim End</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {d.rewardRounds.slice(0, 5).map((r) => (
+                    <tr key={r.id} className="border-b border-slate-800/60">
+                      <td className="py-2 pr-3 font-mono text-slate-200">{r.id}</td>
+                      <td className="py-2 pr-3 text-right font-mono text-slate-200">
+                        {Number(r.totalPoolStable || 0).toFixed(2)} {STABLE}
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-sky-300">
+                        {Number(r.rewardPerOz || 0).toFixed(6)}
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-slate-200">
+                        {Number(r.snapshotTotalEligibleOz || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2 pr-3 text-slate-400">
+                        {new Date(Number(r.claimEndMs || 0)).toLocaleDateString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="mt-3 text-[0.75rem] text-slate-500">
+              No reward rounds created yet.
+            </div>
+          )}
         </div>
       </div>
     </div>

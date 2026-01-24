@@ -24,7 +24,7 @@ function clampInt(val, min, max) {
   return Math.max(min, Math.min(max, i));
 }
 
-// ✅ Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
+// Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
 function normalizeBricksOunces(bricks, ounces, ozPerBrick) {
   const b = clampInt(bricks, 0, 1_000_000);
   const oRaw = clampInt(ounces, 0, 1_000_000);
@@ -47,6 +47,9 @@ export default function BlockSwap() {
 
   const [err, setErr] = useState("");
   const [d, setD] = useState(() => blockswapAdapter.getSnapshot());
+
+  // rewards selection
+  const [selectedRoundId, setSelectedRoundId] = useState("");
 
   // keep snapshot fresh on mount
   useEffect(() => {
@@ -76,9 +79,8 @@ export default function BlockSwap() {
 
   const ozPerBrick = d.ouncesPerBrick || 36;
 
-  // ✅ BLOCKSWAP AMBIENCE — obey master SoundContext toggle
+  // BLOCKSWAP AMBIENCE — obey master SoundContext toggle
   useEffect(() => {
-    // Create once
     if (!ambienceRef.current) {
       const a = new Audio("/sounds/swapambience.m4a");
       a.loop = true;
@@ -102,22 +104,16 @@ export default function BlockSwap() {
       });
     };
 
-    if (soundEnabled) {
-      tryPlay();
-    } else {
-      a.pause();
-      // don’t reset currentTime; makes toggle feel broken
-    }
+    if (soundEnabled) tryPlay();
+    else a.pause();
 
-    return () => {
-      a.pause();
-    };
+    return () => a.pause();
   }, [soundEnabled]);
 
   // Settlement stable symbol
   const STABLE = d.STABLE_SYMBOL || "USDC";
 
-  // ---- Inputs (integers only) ----
+  // Inputs (integers only)
   const [buyBricks, setBuyBricks] = useState(0);
   const [buyOunces, setBuyOunces] = useState(0);
 
@@ -142,10 +138,10 @@ export default function BlockSwap() {
     [sellTotalOz, d]
   );
 
-  const canBuy = d.presaleActive && buyTotalOz > 0;
+  const canBuy = !d.buyPaused && buyTotalOz > 0;
   const canSell = sellTotalOz > 0;
 
-  // Build holders table from balances in state
+  // Holders table from balances
   const holderRows = useMemo(() => {
     const balances = d.balancesOz || {};
     const labels = d.labels || {};
@@ -176,14 +172,11 @@ export default function BlockSwap() {
     return rows;
   }, [d.balancesOz, d.labels, d.circulatingOz, ozPerBrick]);
 
-  // ✅ Street Activity feed (buys/sells/injections/rewards/etc)
+  // Street Activity feed (newest-first)
   const streetActivity = useMemo(() => {
     const raw = Array.isArray(d.activity) ? d.activity : [];
     if (!raw.length) return [];
-
-    // newest-first
-    const items = [...raw].slice().reverse();
-
+    const items = raw.slice(); // already newest-first in adapter
     return items
       .map((x) => ({
         text: String(x?.text ?? ""),
@@ -240,6 +233,51 @@ export default function BlockSwap() {
     }
   };
 
+  // Rewards / Claim
+  const rewardRounds = Array.isArray(d.rewardRounds) ? d.rewardRounds : [];
+
+  const selectedRound = useMemo(() => {
+    if (!selectedRoundId) return null;
+    return rewardRounds.find((r) => r.id === selectedRoundId) || null;
+  }, [rewardRounds, selectedRoundId]);
+
+  const mySnapshotOz = useMemo(() => {
+    if (!selectedRound || !walletAddress) return 0;
+    const addr = String(walletAddress).toLowerCase();
+    return Number(selectedRound.snapshotBalancesOz?.[addr] || 0);
+  }, [selectedRound, walletAddress]);
+
+  const myClaimAmount = useMemo(() => {
+    if (!selectedRound) return 0;
+    return mySnapshotOz * Number(selectedRound.rewardPerOz || 0);
+  }, [selectedRound, mySnapshotOz]);
+
+  const alreadyClaimed = useMemo(() => {
+    if (!selectedRound || !walletAddress) return false;
+    const addr = String(walletAddress).toLowerCase();
+    return !!d.rewardClaims?.[selectedRound.id]?.[addr];
+  }, [d.rewardClaims, selectedRound, walletAddress]);
+
+  const claimOpen = useMemo(() => {
+    if (!selectedRound) return false;
+    return Date.now() <= Number(selectedRound.claimEndMs || 0);
+  }, [selectedRound]);
+
+  const handleClaim = () => {
+    setErr("");
+    try {
+      if (!walletAddress) throw new Error("Connect wallet first.");
+      if (!selectedRoundId) throw new Error("Choose a reward round.");
+      const snap = blockswapAdapter.claimReward({
+        walletAddress,
+        roundId: selectedRoundId,
+      });
+      setD(snap);
+    } catch (e) {
+      setErr(e?.message || "Claim failed.");
+    }
+  };
+
   // Balances (numbers only)
   const buybackVault = Number(d.buybackVault || 0);
   const theBlockTreasury = Number(d.theBlockTreasury || 0);
@@ -257,15 +295,21 @@ export default function BlockSwap() {
               BlockSwap
             </span>
 
-            {d.presaleActive && (
+            {d.earlyBirdBadge ? (
               <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-amber-200">
                 Early Bird
               </span>
-            )}
+            ) : null}
 
             {isAdmin ? (
               <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-sky-200">
                 Admin
+              </span>
+            ) : null}
+
+            {d.buyPaused ? (
+              <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-rose-200">
+                Buys Paused
               </span>
             ) : null}
           </div>
@@ -276,9 +320,7 @@ export default function BlockSwap() {
             </span>
 
             <span className="rounded-full bg-slate-800 px-3 py-1 text-xs">
-              {isConnected
-                ? `${displayName} (${shortAddress})`
-                : "Not connected"}
+              {isConnected ? `${displayName} (${shortAddress})` : "Not connected"}
             </span>
 
             {!isConnected ? (
@@ -415,9 +457,9 @@ export default function BlockSwap() {
                   Buy
                 </button>
 
-                {!d.presaleActive ? (
-                  <p className="mt-2 text-[0.7rem] text-slate-500">
-                    Early Bird is currently disabled.
+                {d.buyPaused ? (
+                  <p className="mt-2 text-[0.7rem] text-rose-300/80">
+                    Buys are paused by Admin right now.
                   </p>
                 ) : (
                   <p className="mt-2 text-[0.7rem] text-slate-500">
@@ -511,7 +553,7 @@ export default function BlockSwap() {
               </div>
             </div>
 
-            {/* ✅ Street Activity feed */}
+            {/* Street Activity */}
             <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
@@ -543,6 +585,72 @@ export default function BlockSwap() {
               <p className="mt-2 text-[0.7rem] text-slate-500">
                 For now this updates when you Refresh / Buy / Sell / Admin changes.
               </p>
+            </div>
+
+            {/* Rewards / Claim (user-facing) */}
+            <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Rewards
+                </h3>
+                <span className="text-[0.7rem] text-slate-500">
+                  Claim-only • 180 days
+                </span>
+              </div>
+
+              {rewardRounds.length ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <select
+                    value={selectedRoundId}
+                    onChange={(e) => setSelectedRoundId(e.target.value)}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                  >
+                    <option value="">Select a reward round…</option>
+                    {rewardRounds.slice(0, 10).map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.id} • Pool {Number(r.totalPoolStable || 0).toFixed(2)} {STABLE}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={handleClaim}
+                    disabled={
+                      !selectedRound ||
+                      !isConnected ||
+                      alreadyClaimed ||
+                      !claimOpen ||
+                      myClaimAmount <= 0
+                    }
+                    className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {alreadyClaimed ? "Claimed" : "Claim"}
+                  </button>
+
+                  {selectedRound ? (
+                    <div className="text-xs text-slate-400">
+                      You:{" "}
+                      <span className="font-mono text-slate-200">{mySnapshotOz}</span>{" "}
+                      oz • Claim:{" "}
+                      <span className="font-mono text-sky-300">
+                        {myClaimAmount.toFixed(2)} {STABLE}
+                      </span>{" "}
+                      {!claimOpen ? (
+                        <span className="ml-2 text-rose-300">(claim ended)</span>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-slate-500">
+                      Select a round to see your claim.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3 text-sm text-slate-500">
+                  No reward rounds yet. Admin creates the first one.
+                </div>
+              )}
             </div>
           </div>
 
@@ -649,7 +757,7 @@ export default function BlockSwap() {
               </div>
 
               <p className="mt-3 text-[0.75rem] text-slate-500">
-                Right now it updates when you Refresh / Buy / Sell / Admin changes. Live mode will be fed by on-chain reads.
+                Live mode will be fed by on-chain reads.
               </p>
             </div>
           </div>
@@ -680,10 +788,7 @@ export default function BlockSwap() {
               <tbody>
                 {holderRows.length ? (
                   holderRows.map((h, idx) => (
-                    <tr
-                      key={idx}
-                      className="border-b border-slate-800/60 last:border-0"
-                    >
+                    <tr key={idx} className="border-b border-slate-800/60 last:border-0">
                       <td className="px-3 py-2 text-slate-100">
                         {h.label || shortAddr(h.address)}
                       </td>
