@@ -15,7 +15,7 @@ import { UIProvider } from "./context/UIContext.jsx";
 // ✅ Wagmi + React Query (required for WalletConnect + wagmi hooks)
 import { wagmiConfig } from "./wagmi.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { wagmiConfig } from "./wallet/wagmi.js";
+
 
 const queryClient = new QueryClient();
 
