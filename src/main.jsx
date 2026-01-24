@@ -12,6 +12,13 @@ import NicknameProvider from "./context/NicknameContext";
 import { SoundProvider } from "./context/SoundContext";
 import { UIProvider } from "./context/UIContext.jsx";
 
+// ✅ Wagmi + React Query (required for WalletConnect + wagmi hooks)
+import { WagmiProvider } from "wagmi";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { wagmiConfig } from "./wallet/wagmi.js";
+
+const queryClient = new QueryClient();
+
 // ✅ Gate must live INSIDE router context
 import PresaleGate from "./components/PresaleGate.jsx";
 
@@ -37,7 +44,6 @@ import NicknameTestPage from "./pages/NicknameTestPage.jsx";
 const router = createBrowserRouter([
   {
     path: "/",
-    // ✅ Wrap App here so PresaleGate can use useLocation()
     element: (
       <PresaleGate>
         <App />
@@ -76,14 +82,18 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <WalletProvider>
-      <NicknameProvider>
-        <SoundProvider>
-          <UIProvider>
-            <RouterProvider router={router} />
-          </UIProvider>
-        </SoundProvider>
-      </NicknameProvider>
-    </WalletProvider>
+    <WagmiProvider config={wagmiConfig}>
+      <QueryClientProvider client={queryClient}>
+        <WalletProvider>
+          <NicknameProvider>
+            <SoundProvider>
+              <UIProvider>
+                <RouterProvider router={router} />
+              </UIProvider>
+            </SoundProvider>
+          </NicknameProvider>
+        </WalletProvider>
+      </QueryClientProvider>
+    </WagmiProvider>
   </React.StrictMode>
 );
