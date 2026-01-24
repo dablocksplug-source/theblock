@@ -34,8 +34,10 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
       setMsg("");
       const snap = fn();
       onUpdated?.(snap);
+      return snap;
     } catch (e) {
       setErr(e?.message || "Admin action failed.");
+      return null;
     }
   };
 
@@ -141,14 +143,15 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
 
             <button
               type="button"
-              onClick={() =>
-                act(() =>
+              onClick={() => {
+                const snap = act(() =>
                   blockswapAdapter.adminFundTreasury({
                     walletAddress,
                     amountStable: fund,
                   })
-                )
-              }
+                );
+                if (snap) setFund("");
+              }}
               className="shrink-0 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300"
             >
               Deposit
@@ -156,14 +159,15 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
 
             <button
               type="button"
-              onClick={() =>
-                act(() =>
+              onClick={() => {
+                const snap = act(() =>
                   blockswapAdapter.adminMoveToBuybackVault({
                     walletAddress,
                     amountStable: fund,
                   })
-                )
-              }
+                );
+                if (snap) setFund("");
+              }}
               className="shrink-0 rounded-lg border border-amber-400/40 bg-slate-900 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-slate-800"
             >
               Move from TheBlock
@@ -186,13 +190,13 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
           <div className="mt-3 grid gap-1 text-[0.75rem] text-slate-400">
             <div>
               BuybackVault:{" "}
-              <span className="text-emerald-200 font-mono">
+              <span className="font-mono text-emerald-200">
                 {Number(d.buybackVault || 0).toLocaleString()} {STABLE}
               </span>
             </div>
             <div>
               TheBlock:{" "}
-              <span className="text-sky-300 font-mono">
+              <span className="font-mono text-sky-300">
                 {Number(d.theBlockTreasury || 0).toLocaleString()} {STABLE}
               </span>
             </div>
@@ -294,13 +298,13 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
             <button
               type="button"
               onClick={() => {
-                act(() =>
+                const snap = act(() =>
                   blockswapAdapter.adminCreateRewardRound({
                     walletAddress,
                     poolStable: rewardPool,
                   })
                 );
-                setRewardPool("");
+                if (snap) setRewardPool("");
               }}
               className="rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-400"
             >
@@ -354,7 +358,7 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
                 <tbody>
                   {d.rewardRounds.slice(0, 5).map((r) => (
                     <tr key={r.id} className="border-b border-slate-800/60">
-                      <td className="py-2 pr-3 font-mono text-slate-200">{r.id}</td>
+                      <td className="py-2 pr-3 font-mono text-slate-200">#{r.id}</td>
                       <td className="py-2 pr-3 text-right font-mono text-slate-200">
                         {Number(r.totalPoolStable || 0).toFixed(2)} {STABLE}
                       </td>
