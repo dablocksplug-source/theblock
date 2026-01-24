@@ -1,5 +1,5 @@
 // src/components/BlockSwapAdminPanel.jsx
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useEffect, useState } from "react";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
@@ -12,7 +12,6 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  // keep inputs in sync when snapshot updates
   useEffect(() => {
     setSell(String(d.sellPricePerBrick ?? 0));
     setFloor(String(d.buybackFloorPerBrick ?? 0));
@@ -40,7 +39,6 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
     }
   };
 
-  // settlement (locked for you, but read from snapshot to stay consistent)
   const STABLE = d.STABLE_SYMBOL || "USDC";
 
   const short = (a) =>
@@ -75,7 +73,6 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
           <div className="text-xs text-slate-400">Controls</div>
 
           <div className="mt-2 flex flex-wrap gap-2">
-            {/* Early Bird badge (marketing only) */}
             <button
               type="button"
               onClick={() =>
@@ -96,7 +93,6 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
               Early Bird Badge: {d.earlyBirdBadge ? "ON" : "OFF"}
             </button>
 
-            {/* Pause Buys (real gate) */}
             <button
               type="button"
               onClick={() =>

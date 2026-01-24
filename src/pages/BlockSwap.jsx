@@ -19,12 +19,12 @@ function bricksOzFromTotal(totalOz, ozPerBrick) {
 }
 
 function clampInt(val, min, max) {
-  const n = Number.isFinite(val) ? val : 0;
-  const i = Math.trunc(n);
+  const n = Number.isFinite(val) ? val : Number(val || 0);
+  const i = Number.isFinite(n) ? Math.trunc(n) : 0;
   return Math.max(min, Math.min(max, i));
 }
 
-// Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
+// ✅ Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
 function normalizeBricksOunces(bricks, ounces, ozPerBrick) {
   const b = clampInt(bricks, 0, 1_000_000);
   const oRaw = clampInt(ounces, 0, 1_000_000);
@@ -48,8 +48,9 @@ export default function BlockSwap() {
   const [err, setErr] = useState("");
   const [d, setD] = useState(() => blockswapAdapter.getSnapshot());
 
-  // rewards selection
-  const [selectedRoundId, setSelectedRoundId] = useState("");
+  // claim UI
+  const [claimRoundId, setClaimRoundId] = useState("");
+  const [claimMsg, setClaimMsg] = useState("");
 
   // keep snapshot fresh on mount
   useEffect(() => {
@@ -62,6 +63,7 @@ export default function BlockSwap() {
 
   const refresh = () => {
     setErr("");
+    setClaimMsg("");
     try {
       setD(blockswapAdapter.getSnapshot());
     } catch (e) {
@@ -79,7 +81,7 @@ export default function BlockSwap() {
 
   const ozPerBrick = d.ouncesPerBrick || 36;
 
-  // BLOCKSWAP AMBIENCE — obey master SoundContext toggle
+  // ✅ BLOCKSWAP AMBIENCE — obey master SoundContext toggle
   useEffect(() => {
     if (!ambienceRef.current) {
       const a = new Audio("/sounds/swapambience.m4a");
@@ -110,10 +112,10 @@ export default function BlockSwap() {
     return () => a.pause();
   }, [soundEnabled]);
 
-  // Settlement stable symbol
+  // Settlement stable symbol (locked to USDC in config/store, but read from snapshot)
   const STABLE = d.STABLE_SYMBOL || "USDC";
 
-  // Inputs (integers only)
+  // ---- Inputs (integers only) ----
   const [buyBricks, setBuyBricks] = useState(0);
   const [buyOunces, setBuyOunces] = useState(0);
 
@@ -124,6 +126,7 @@ export default function BlockSwap() {
     () => buyBricks * ozPerBrick + buyOunces,
     [buyBricks, buyOunces, ozPerBrick]
   );
+
   const sellTotalOz = useMemo(
     () => sellBricks * ozPerBrick + sellOunces,
     [sellBricks, sellOunces, ozPerBrick]
@@ -133,20 +136,24 @@ export default function BlockSwap() {
     () => (d ? buyTotalOz * (d.ounceSellPrice || 0) : 0),
     [buyTotalOz, d]
   );
+
   const sellProceeds = useMemo(
     () => (d ? sellTotalOz * (d.ounceBuybackFloor || 0) : 0),
     [sellTotalOz, d]
   );
 
+  // ✅ new rules:
+  // - EarlyBird badge is marketing ONLY (d.earlyBirdBadge)
+  // - Buys can be paused (d.buyPaused) => real gate
   const canBuy = !d.buyPaused && buyTotalOz > 0;
   const canSell = sellTotalOz > 0;
 
-  // Holders table from balances
+  // Build holders table from balances in state
   const holderRows = useMemo(() => {
     const balances = d.balancesOz || {};
     const labels = d.labels || {};
 
-    const rows = Object.entries(balances)
+    return Object.entries(balances)
       .map(([addrLower, ounces]) => {
         const ouncesNum = Number(ounces || 0);
         const { b, o } = bricksOzFromTotal(ouncesNum, ozPerBrick);
@@ -168,16 +175,12 @@ export default function BlockSwap() {
         };
       })
       .sort((a, b) => b.ounces - a.ounces);
-
-    return rows;
   }, [d.balancesOz, d.labels, d.circulatingOz, ozPerBrick]);
 
-  // Street Activity feed (newest-first)
+  // ✅ Street Activity feed (newest first)
   const streetActivity = useMemo(() => {
     const raw = Array.isArray(d.activity) ? d.activity : [];
-    if (!raw.length) return [];
-    const items = raw.slice(); // already newest-first in adapter
-    return items
+    return raw
       .map((x) => ({
         text: String(x?.text ?? ""),
         ts: String(x?.ts ?? ""),
@@ -185,10 +188,33 @@ export default function BlockSwap() {
       .filter((x) => x.text);
   }, [d.activity]);
 
+  // Rewards helpers
+  const myAddr = String(walletAddress || "").toLowerCase();
+  const myOz = Number((d.balancesOz || {})[myAddr] || 0);
+  const myClaimedTotal = Number((d.claimedRewardsStable || {})[myAddr] || 0);
+
+  const rewardRounds = useMemo(() => {
+    const rounds = Array.isArray(d.rewardRounds) ? d.rewardRounds : [];
+    return rounds.slice(); // newest-first already
+  }, [d.rewardRounds]);
+
+  const connectOrWarn = async () => {
+    try {
+      setErr("");
+      await connectWallet?.();
+      refresh();
+    } catch (e) {
+      setErr(e?.message || "Wallet connect failed.");
+    }
+  };
+
   const handleBuy = () => {
     setErr("");
+    setClaimMsg("");
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
+      if (d.buyPaused) throw new Error("Buys are paused by admin right now.");
+
       const label = getDisplayName({ walletAddress, nickname, useNickname });
 
       const snap = blockswapAdapter.buy({
@@ -207,6 +233,7 @@ export default function BlockSwap() {
 
   const handleSell = () => {
     setErr("");
+    setClaimMsg("");
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
 
@@ -223,69 +250,30 @@ export default function BlockSwap() {
     }
   };
 
-  const connectOrWarn = async () => {
-    try {
-      setErr("");
-      await connectWallet?.();
-      refresh();
-    } catch (e) {
-      setErr(e?.message || "Wallet connect failed.");
-    }
-  };
-
-  // Rewards / Claim
-  const rewardRounds = Array.isArray(d.rewardRounds) ? d.rewardRounds : [];
-
-  const selectedRound = useMemo(() => {
-    if (!selectedRoundId) return null;
-    return rewardRounds.find((r) => r.id === selectedRoundId) || null;
-  }, [rewardRounds, selectedRoundId]);
-
-  const mySnapshotOz = useMemo(() => {
-    if (!selectedRound || !walletAddress) return 0;
-    const addr = String(walletAddress).toLowerCase();
-    return Number(selectedRound.snapshotBalancesOz?.[addr] || 0);
-  }, [selectedRound, walletAddress]);
-
-  const myClaimAmount = useMemo(() => {
-    if (!selectedRound) return 0;
-    return mySnapshotOz * Number(selectedRound.rewardPerOz || 0);
-  }, [selectedRound, mySnapshotOz]);
-
-  const alreadyClaimed = useMemo(() => {
-    if (!selectedRound || !walletAddress) return false;
-    const addr = String(walletAddress).toLowerCase();
-    return !!d.rewardClaims?.[selectedRound.id]?.[addr];
-  }, [d.rewardClaims, selectedRound, walletAddress]);
-
-  const claimOpen = useMemo(() => {
-    if (!selectedRound) return false;
-    return Date.now() <= Number(selectedRound.claimEndMs || 0);
-  }, [selectedRound]);
-
-  const handleClaim = () => {
+  const handleClaim = (rid) => {
     setErr("");
+    setClaimMsg("");
     try {
-      if (!walletAddress) throw new Error("Connect wallet first.");
-      if (!selectedRoundId) throw new Error("Choose a reward round.");
+      if (!walletAddress) throw new Error("Connect wallet to claim.");
       const snap = blockswapAdapter.claimReward({
         walletAddress,
-        roundId: selectedRoundId,
+        roundId: rid,
       });
       setD(snap);
+      setClaimMsg(`Claim submitted ✅ Round #${rid}`);
     } catch (e) {
       setErr(e?.message || "Claim failed.");
     }
   };
 
-  // Balances (numbers only)
   const buybackVault = Number(d.buybackVault || 0);
   const theBlockTreasury = Number(d.theBlockTreasury || 0);
   const buybackCapacityOz = Number(d.buybackCapacityOz || 0);
 
+  const buyStatusLabel = d.buyPaused ? "PAUSED" : "LIVE";
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
-      {/* Header */}
       <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4">
           <div className="flex items-baseline gap-2">
@@ -301,15 +289,21 @@ export default function BlockSwap() {
               </span>
             ) : null}
 
+            <span
+              className={
+                "rounded-full border px-2 py-0.5 text-xs uppercase tracking-wide " +
+                (d.buyPaused
+                  ? "border-rose-400/30 bg-rose-500/10 text-rose-200"
+                  : "border-emerald-400/30 bg-emerald-500/10 text-emerald-200")
+              }
+              title="Buys are controlled by admin pause"
+            >
+              Buys: {buyStatusLabel}
+            </span>
+
             {isAdmin ? (
               <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-sky-200">
                 Admin
-              </span>
-            ) : null}
-
-            {d.buyPaused ? (
-              <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-rose-200">
-                Buys Paused
               </span>
             ) : null}
           </div>
@@ -357,6 +351,12 @@ export default function BlockSwap() {
           </div>
         ) : null}
 
+        {claimMsg ? (
+          <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+            {claimMsg}
+          </div>
+        ) : null}
+
         {/* Admin Panel */}
         <BlockSwapAdminPanel
           walletAddress={walletAddress}
@@ -364,31 +364,40 @@ export default function BlockSwap() {
           onUpdated={(snap) => setD(snap)}
         />
 
-        {/* Top grid: Trade + Vaults/Supply */}
+        {/* Trade + Right column */}
         <section className="grid gap-6 lg:grid-cols-[1.4fr,1fr]">
           {/* Trade */}
           <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Buy
+                Trade
               </h2>
-              <span className="text-xs text-slate-400">
-                1 brick = {ozPerBrick} oz
-              </span>
+              <span className="text-xs text-slate-400">1 brick = {ozPerBrick} oz</span>
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">
               {/* BUY */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Buy
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Buy
+                  </div>
+
+                  <span
+                    className={
+                      "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
+                      (d.buyPaused
+                        ? "bg-rose-500/15 text-rose-200"
+                        : "bg-emerald-500/15 text-emerald-200")
+                    }
+                  >
+                    {d.buyPaused ? "PAUSED" : "LIVE"}
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="mb-2 block text-xs text-slate-400">
-                      Bricks
-                    </label>
+                    <label className="mb-2 block text-xs text-slate-400">Bricks</label>
                     <input
                       type="number"
                       min="0"
@@ -405,13 +414,12 @@ export default function BlockSwap() {
                         setBuyOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+                      disabled={d.buyPaused}
                     />
                   </div>
 
                   <div>
-                    <label className="mb-2 block text-xs text-slate-400">
-                      Ounces
-                    </label>
+                    <label className="mb-2 block text-xs text-slate-400">Ounces</label>
                     <input
                       type="number"
                       min="0"
@@ -428,6 +436,7 @@ export default function BlockSwap() {
                         setBuyOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+                      disabled={d.buyPaused}
                     />
                     <div className="mt-1 text-[0.65rem] text-slate-500">
                       Auto-carries into bricks (0–{ozPerBrick - 1} shown).
@@ -450,16 +459,20 @@ export default function BlockSwap() {
 
                 <button
                   className="mt-4 w-full rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canBuy}
+                  disabled={!canBuy || !isConnected}
                   onClick={handleBuy}
                   type="button"
                 >
                   Buy
                 </button>
 
-                {d.buyPaused ? (
-                  <p className="mt-2 text-[0.7rem] text-rose-300/80">
-                    Buys are paused by Admin right now.
+                {!isConnected ? (
+                  <p className="mt-2 text-[0.7rem] text-slate-500">
+                    Connect your wallet to buy.
+                  </p>
+                ) : d.buyPaused ? (
+                  <p className="mt-2 text-[0.7rem] text-rose-200/80">
+                    Buys are paused by admin right now.
                   </p>
                 ) : (
                   <p className="mt-2 text-[0.7rem] text-slate-500">
@@ -476,9 +489,7 @@ export default function BlockSwap() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="mb-2 block text-xs text-slate-400">
-                      Bricks
-                    </label>
+                    <label className="mb-2 block text-xs text-slate-400">Bricks</label>
                     <input
                       type="number"
                       min="0"
@@ -499,9 +510,7 @@ export default function BlockSwap() {
                   </div>
 
                   <div>
-                    <label className="mb-2 block text-xs text-slate-400">
-                      Ounces
-                    </label>
+                    <label className="mb-2 block text-xs text-slate-400">Ounces</label>
                     <input
                       type="number"
                       min="0"
@@ -540,16 +549,22 @@ export default function BlockSwap() {
 
                 <button
                   className="mt-4 w-full rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canSell}
+                  disabled={!canSell || !isConnected}
                   onClick={handleSell}
                   type="button"
                 >
                   Sell Back
                 </button>
 
-                <p className="mt-2 text-[0.7rem] text-emerald-200/80">
-                  Pays from the Buyback Vault when wired live.
-                </p>
+                {!isConnected ? (
+                  <p className="mt-2 text-[0.7rem] text-slate-500">
+                    Connect your wallet to sell back.
+                  </p>
+                ) : (
+                  <p className="mt-2 text-[0.7rem] text-emerald-200/80">
+                    Sellback stays available (limited by vault funds).
+                  </p>
+                )}
               </div>
             </div>
 
@@ -564,7 +579,7 @@ export default function BlockSwap() {
                 </span>
               </div>
 
-              <ul className="mt-3 space-y-2 text-xs text-slate-300 max-h-44 overflow-y-auto pr-1">
+              <ul className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1 text-xs text-slate-300">
                 {streetActivity.length ? (
                   streetActivity.map((item, idx) => (
                     <li
@@ -583,78 +598,12 @@ export default function BlockSwap() {
               </ul>
 
               <p className="mt-2 text-[0.7rem] text-slate-500">
-                For now this updates when you Refresh / Buy / Sell / Admin changes.
+                Demo mode updates on Refresh / Buy / Sell / Admin changes.
               </p>
-            </div>
-
-            {/* Rewards / Claim (user-facing) */}
-            <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
-                  Rewards
-                </h3>
-                <span className="text-[0.7rem] text-slate-500">
-                  Claim-only • 180 days
-                </span>
-              </div>
-
-              {rewardRounds.length ? (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <select
-                    value={selectedRoundId}
-                    onChange={(e) => setSelectedRoundId(e.target.value)}
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
-                  >
-                    <option value="">Select a reward round…</option>
-                    {rewardRounds.slice(0, 10).map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.id} • Pool {Number(r.totalPoolStable || 0).toFixed(2)} {STABLE}
-                      </option>
-                    ))}
-                  </select>
-
-                  <button
-                    type="button"
-                    onClick={handleClaim}
-                    disabled={
-                      !selectedRound ||
-                      !isConnected ||
-                      alreadyClaimed ||
-                      !claimOpen ||
-                      myClaimAmount <= 0
-                    }
-                    className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {alreadyClaimed ? "Claimed" : "Claim"}
-                  </button>
-
-                  {selectedRound ? (
-                    <div className="text-xs text-slate-400">
-                      You:{" "}
-                      <span className="font-mono text-slate-200">{mySnapshotOz}</span>{" "}
-                      oz • Claim:{" "}
-                      <span className="font-mono text-sky-300">
-                        {myClaimAmount.toFixed(2)} {STABLE}
-                      </span>{" "}
-                      {!claimOpen ? (
-                        <span className="ml-2 text-rose-300">(claim ended)</span>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-slate-500">
-                      Select a round to see your claim.
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="mt-3 text-sm text-slate-500">
-                  No reward rounds yet. Admin creates the first one.
-                </div>
-              )}
             </div>
           </div>
 
-          {/* Right side: Vaults + Supply */}
+          {/* Right Column */}
           <div className="space-y-4">
             {/* Vaults */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
@@ -694,62 +643,49 @@ export default function BlockSwap() {
               </dl>
 
               <p className="mt-4 text-[0.75rem] leading-relaxed text-slate-500">
-                We’ll drop the live contract address right here when it’s deployed.
+                We’ll drop the live contract address right here when it’s deployed on Base.
               </p>
             </div>
 
-            {/* Supply */}
+            {/* Rewards Claim */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Supply Snapshot
+                Rewards / Claims
               </h3>
 
-              <dl className="mt-4 space-y-3 text-sm">
-                <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Total supply</dt>
-                  <dd className="text-right font-mono text-slate-200">
-                    {Number(d.totalBricks || 0).toLocaleString()} bricks
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      {Number(d.totalOz || 0).toLocaleString()} ounces total
-                    </div>
-                  </dd>
+              <div className="mt-3 grid gap-2 text-sm">
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-400">Your balance</span>
+                  <span className="font-mono text-slate-200">{myOz.toLocaleString()} oz</span>
                 </div>
-
-                <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Locked by The Block</dt>
-                  <dd className="text-right font-mono text-slate-200">
-                    {Number(d.lockedBricks || 0).toLocaleString()} bricks
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      {Number(d.lockedOz || 0).toLocaleString()} ounces
-                    </div>
-                  </dd>
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-400">Claimed total</span>
+                  <span className="font-mono text-emerald-200">
+                    {myClaimedTotal.toFixed(2)} {STABLE}
+                  </span>
                 </div>
+              </div>
 
-                <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">In circulation</dt>
-                  <dd className="text-right font-mono text-slate-200">
-                    {Number(d.circulatingBricks || 0).toLocaleString()} bricks
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      {Number(d.circulatingOz || 0).toLocaleString()} ounces
-                    </div>
-                  </dd>
-                </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <input
+                  value={claimRoundId}
+                  onChange={(e) => setClaimRoundId(e.target.value)}
+                  placeholder="Round # (ex: 1)"
+                  className="w-44 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
+                />
 
-                <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Remaining (for sale)</dt>
-                  <dd className="text-right font-mono text-slate-200">
-                    {Number(d.ouncesRemainingForSale || 0).toLocaleString()} oz
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      {(Number(d.ouncesRemainingForSale || 0) / ozPerBrick).toFixed(0)} bricks
-                    </div>
-                  </dd>
-                </div>
-              </dl>
+                <button
+                  type="button"
+                  onClick={() => handleClaim(claimRoundId)}
+                  disabled={!isConnected || !String(claimRoundId).trim()}
+                  className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Claim
+                </button>
 
-              <div className="mt-4 flex justify-end">
                 <button
                   onClick={refresh}
-                  className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-500"
+                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:border-slate-500"
                   type="button"
                 >
                   Refresh
@@ -757,8 +693,92 @@ export default function BlockSwap() {
               </div>
 
               <p className="mt-3 text-[0.75rem] text-slate-500">
-                Live mode will be fed by on-chain reads.
+                Demo mode: claims update local state. On-chain version will be Merkle claim with a 180-day window.
               </p>
+
+              {/* Recent rounds */}
+              <div className="mt-4">
+                <div className="mb-2 text-xs uppercase tracking-wide text-slate-400">
+                  Recent rounds
+                </div>
+
+                {rewardRounds.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-left text-xs">
+                      <thead className="border-b border-slate-800 text-slate-400">
+                        <tr>
+                          <th className="py-2 pr-3">Round</th>
+                          <th className="py-2 pr-3 text-right">Pool</th>
+                          <th className="py-2 pr-3 text-right">Per Oz</th>
+                          <th className="py-2 pr-3 text-right">Eligible Oz</th>
+                          <th className="py-2 pr-3">Claim End</th>
+                          <th className="py-2 pr-3 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rewardRounds.slice(0, 5).map((r) => {
+                          const rid = Number(r?.id || 0);
+                          const claimEndMs = Number(r?.claimEndMs || 0);
+                          const ended = Date.now() > claimEndMs;
+
+                          const snapshot = r?.snapshotBalancesOz || {};
+                          const eligibleOz = Number(snapshot[myAddr] || 0);
+                          const already = !!(r?.claimed && r.claimed[myAddr]);
+
+                          const can =
+                            isConnected && !ended && eligibleOz > 0 && !already;
+
+                          return (
+                            <tr key={rid} className="border-b border-slate-800/60">
+                              <td className="py-2 pr-3 font-mono text-slate-200">#{rid}</td>
+                              <td className="py-2 pr-3 text-right font-mono text-slate-200">
+                                {Number(r?.totalPoolStable || 0).toFixed(2)} {STABLE}
+                              </td>
+                              <td className="py-2 pr-3 text-right font-mono text-sky-300">
+                                {Number(r?.rewardPerOz || 0).toFixed(6)}
+                              </td>
+                              <td className="py-2 pr-3 text-right font-mono text-slate-200">
+                                {Number(r?.snapshotTotalEligibleOz || 0).toLocaleString()}
+                              </td>
+                              <td className="py-2 pr-3 text-slate-400">
+                                {claimEndMs ? new Date(claimEndMs).toLocaleDateString() : "—"}
+                              </td>
+                              <td className="py-2 pr-3 text-right">
+                                {already ? (
+                                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200">
+                                    Claimed
+                                  </span>
+                                ) : ended ? (
+                                  <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">
+                                    Ended
+                                  </span>
+                                ) : eligibleOz <= 0 ? (
+                                  <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">
+                                    Not eligible
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleClaim(rid)}
+                                    disabled={!can}
+                                    className="rounded-lg bg-emerald-500 px-2 py-1 text-[11px] font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                                  >
+                                    Claim
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-[0.75rem] text-slate-500">
+                    No reward rounds created yet.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </section>
@@ -795,9 +815,7 @@ export default function BlockSwap() {
                       <td className="px-3 py-2 text-xs font-mono text-slate-400">
                         {shortAddr(h.address)}
                       </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {h.weightLabel}
-                      </td>
+                      <td className="px-3 py-2 text-right font-mono">{h.weightLabel}</td>
                       <td className="px-3 py-2 text-right text-xs text-slate-400">
                         {Number(h.pctWeightCirculating || 0).toFixed(3)}%
                       </td>
@@ -826,7 +844,7 @@ export default function BlockSwap() {
           </div>
 
           <p className="mt-3 text-[0.75rem] text-slate-500">
-            Demo mode persists locally in your browser. When wired live, this will read on-chain balances.
+            Demo mode persists locally in your browser. On-chain will read OZ balances from Base.
           </p>
         </section>
       </main>
