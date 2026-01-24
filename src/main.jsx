@@ -10,7 +10,7 @@ import App from "./App.jsx";
 import { WalletProvider } from "./context/WalletContext";
 import NicknameProvider from "./context/NicknameContext";
 import { SoundProvider } from "./context/SoundContext";
-import { UIProvider } from "./context/UIContext.jsx"; // ✅ ADD THIS
+import { UIProvider } from "./context/UIContext.jsx";
 
 // ✅ Gate must live INSIDE router context
 import PresaleGate from "./components/PresaleGate.jsx";
@@ -79,7 +79,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <WalletProvider>
       <NicknameProvider>
         <SoundProvider>
-          <UIProvider> {/* ✅ ADD THIS WRAP */}
+          <UIProvider>
             <RouterProvider router={router} />
           </UIProvider>
         </SoundProvider>

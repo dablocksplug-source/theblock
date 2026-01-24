@@ -1,13 +1,13 @@
 // src/pages/BlockSwap.jsx
-import React, { useEffect, useMemo, useState, useRef  } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import { Link } from "react-router-dom";
-import { useUI } from "../context/UIContext.jsx";
 
 import { blockswapAdapter } from "../services/blockswapAdapter";
 import BlockSwapAdminPanel from "../components/BlockSwapAdminPanel";
 
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
+import { useSound } from "../context/SoundContext";
 
 const shortAddr = (a) =>
   a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
@@ -38,10 +38,9 @@ function normalizeBricksOunces(bricks, ounces, ozPerBrick) {
 export default function BlockSwap() {
   const { walletAddress, isConnected, connectWallet } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
+  const { soundEnabled } = useSound();
 
-  const { isAudioOn } = useUI();
-const ambienceRef = useRef(null);
-
+  const ambienceRef = useRef(null);
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
   const shortAddress = shortAddr(walletAddress);
@@ -77,43 +76,43 @@ const ambienceRef = useRef(null);
 
   const ozPerBrick = d.ouncesPerBrick || 36;
 
- useEffect(() => {
-  // Create once
-  if (!ambienceRef.current) {
-    const a = new Audio("/sounds/swapambience.m4a");
-    a.loop = true;
-    a.volume = 0.25;
-    ambienceRef.current = a;
-  }
+  // ✅ BLOCKSWAP AMBIENCE — obey master SoundContext toggle
+  useEffect(() => {
+    // Create once
+    if (!ambienceRef.current) {
+      const a = new Audio("/sounds/swapambience.m4a");
+      a.loop = true;
+      a.volume = 0.25;
+      ambienceRef.current = a;
+    }
 
-  const a = ambienceRef.current;
+    const a = ambienceRef.current;
 
-  // helper: try to play, and if blocked, wait for a user gesture
-  const tryPlay = () => {
-    a.play().catch(() => {
-      const resume = () => {
-        a.play().catch(() => {});
-        window.removeEventListener("pointerdown", resume);
-        window.removeEventListener("touchstart", resume);
-        window.removeEventListener("click", resume);
-      };
-      window.addEventListener("pointerdown", resume, { once: true });
-      window.addEventListener("touchstart", resume, { once: true });
-      window.addEventListener("click", resume, { once: true });
-    });
-  };
+    const tryPlay = () => {
+      a.play().catch(() => {
+        const resume = () => {
+          a.play().catch(() => {});
+          window.removeEventListener("pointerdown", resume);
+          window.removeEventListener("touchstart", resume);
+          window.removeEventListener("click", resume);
+        };
+        window.addEventListener("pointerdown", resume, { once: true });
+        window.addEventListener("touchstart", resume, { once: true });
+        window.addEventListener("click", resume, { once: true });
+      });
+    };
 
-  if (isAudioOn) {
-    tryPlay();
-  } else {
-    a.pause();
-    // don't reset time here; makes it feel broken on toggle
-  }
+    if (soundEnabled) {
+      tryPlay();
+    } else {
+      a.pause();
+      // don’t reset currentTime; makes toggle feel broken
+    }
 
-  return () => {
-    a.pause();
-  };
-}, [isAudioOn]);
+    return () => {
+      a.pause();
+    };
+  }, [soundEnabled]);
 
   // Settlement stable symbol
   const STABLE = d.STABLE_SYMBOL || "USDC";
@@ -179,16 +178,12 @@ const ambienceRef = useRef(null);
 
   // ✅ Street Activity feed (buys/sells/injections/rewards/etc)
   const streetActivity = useMemo(() => {
-    // If adapter already provides activity, use it.
     const raw = Array.isArray(d.activity) ? d.activity : [];
+    if (!raw.length) return [];
 
-    // Keep it newest-first if it isn’t already.
-    const items = [...raw].reverse?.() ? raw : raw;
+    // newest-first
+    const items = [...raw].slice().reverse();
 
-    // If it's empty, show a placeholder.
-    if (!items.length) return [];
-
-    // Normalize for rendering
     return items
       .map((x) => ({
         text: String(x?.text ?? ""),
@@ -516,7 +511,7 @@ const ambienceRef = useRef(null);
               </div>
             </div>
 
-            {/* ✅ Street Activity feed in the blank space */}
+            {/* ✅ Street Activity feed */}
             <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
@@ -553,7 +548,7 @@ const ambienceRef = useRef(null);
 
           {/* Right side: Vaults + Supply */}
           <div className="space-y-4">
-            {/* Vaults & Contract (balances only) */}
+            {/* Vaults */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
                 Vaults & Contract

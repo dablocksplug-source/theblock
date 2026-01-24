@@ -1,33 +1,46 @@
-// src/components/SoundToggle.jsx
-import React, { useEffect, useRef } from "react";
+import React from "react";
 import { useSound } from "../context/SoundContext";
 
+export default function SoundToggle({ className = "" }) {
+  const { soundEnabled, toggleSound, playSfx } = useSound();
 
-export default function SoundToggle() {
-  const { soundEnabled, setSoundEnabled } = useSound();
-  const audioRef = useRef(null);
-
-  useEffect(() => {
-    if (soundEnabled) {
-      const audio = new Audio("/sounds/ambience.mp3");
-      audio.loop = true;
-      audio.volume = 0.08;
-      audio.play().catch(() => {});
-      audioRef.current = audio;
-    } else if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+  const onClick = async () => {
+    // If sound is currently OFF, user is turning it ON:
+    // enable first, then play click so the click confirms audio is working.
+    if (!soundEnabled) {
+      toggleSound();
+      // tiny delay ensures state flips + browser gesture is captured
+      setTimeout(() => playSfx("click", { volume: 0.8 }), 0);
+      return;
     }
-  }, [soundEnabled]);
+
+    // If sound is currently ON, user is turning it OFF:
+    // play click first, then disable.
+    await playSfx("click", { volume: 0.8 });
+    toggleSound();
+  };
 
   return (
     <button
-      onClick={() => setSoundEnabled((v) => !v)}
-      className={`fixed bottom-3 right-3 z-50 rounded-full border border-sky-500/30 bg-slate-900/70 px-3 py-2 text-[10px] text-sky-300 hover:bg-sky-500/10 transition ${
-        soundEnabled ? "shadow-[0_0_20px_rgba(56,189,248,0.5)]" : ""
-      }`}
+      type="button"
+      onClick={onClick}
+      className={[
+        "inline-flex items-center gap-2 rounded-full px-3 py-1.5",
+        "border border-white/15 bg-black/30 backdrop-blur",
+        "text-sm font-semibold text-white hover:bg-black/45",
+        "transition",
+        className,
+      ].join(" ")}
+      aria-label={soundEnabled ? "Sound on" : "Sound off"}
+      title={soundEnabled ? "Sound: ON" : "Sound: OFF"}
     >
-      {soundEnabled ? "🔊 Sound On" : "🔈 Sound Off"}
+      <span
+        className={[
+          "h-2.5 w-2.5 rounded-full",
+          soundEnabled ? "bg-emerald-400" : "bg-red-400",
+        ].join(" ")}
+      />
+      <span>{soundEnabled ? "Sound On" : "Sound Off"}</span>
     </button>
   );
 }
