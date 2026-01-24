@@ -1,0 +1,28 @@
+import { http, createConfig } from "wagmi";
+import { base } from "wagmi/chains";
+import { metaMask, walletConnect } from "wagmi/connectors";
+
+const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID;
+
+if (!projectId) {
+  console.warn("Missing VITE_WALLETCONNECT_PROJECT_ID");
+}
+
+export const wagmiConfig = createConfig({
+  chains: [base],
+  transports: {
+    [base.id]: http(),
+  },
+  connectors: [
+    walletConnect({
+      projectId,
+      metadata: {
+        name: "The Block",
+        description: "BlockSwap",
+        url: "https://theblock.vercel.app",
+        icons: ["https://theblock.vercel.app/favicon.ico"],
+      },
+    }),
+    metaMask(),
+  ],
+});
