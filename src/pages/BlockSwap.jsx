@@ -8,13 +8,37 @@ import BlockSwapAdminPanel from "../components/BlockSwapAdminPanel";
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
 import { useSound } from "../context/SoundContext";
+import { BLOCKSWAP_CONFIG as C } from "../config/blockswap.config";
+
+// ✅ Supabase (optional) — singleton to avoid multiple GoTrueClient instances during HMR
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+// Dev toggle (optional): show extra debug actions
+const DEBUG_LOGS = String(import.meta.env.VITE_DEBUG_LOGS || "") === "1";
+
+function getSupabaseSingleton() {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_ANON) return null;
+    const g = globalThis;
+    if (g.__theblock_supabase) return g.__theblock_supabase;
+    g.__theblock_supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+    return g.__theblock_supabase;
+  } catch {
+    return null;
+  }
+}
+const supabase = getSupabaseSingleton();
 
 const shortAddr = (a) =>
   a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
 
 function bricksOzFromTotal(totalOz, ozPerBrick) {
-  const b = Math.floor(totalOz / ozPerBrick);
-  const o = totalOz % ozPerBrick;
+  const t = Number(totalOz || 0);
+  const b = Math.floor(t / ozPerBrick);
+  const o = t % ozPerBrick;
   return { b, o };
 }
 
@@ -24,65 +48,168 @@ function clampInt(val, min, max) {
   return Math.max(min, Math.min(max, i));
 }
 
-// ✅ Takes (bricks, ounces) and normalizes ounces into bricks if ounces >= ozPerBrick
 function normalizeBricksOunces(bricks, ounces, ozPerBrick) {
   const b = clampInt(bricks, 0, 1_000_000);
   const oRaw = clampInt(ounces, 0, 1_000_000);
-
   const carry = Math.floor(oRaw / ozPerBrick);
   const o = oRaw % ozPerBrick;
-
   return { bricks: b + carry, ounces: o };
 }
 
+function chunk(arr, size) {
+  const safe = Array.isArray(arr) ? arr : [];
+  const out = [];
+  for (let i = 0; i < safe.length; i += size) out.push(safe.slice(i, i + size));
+  return out;
+}
+
+function prettyMaybeNumberString(v, maxFrac = 6) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? "—");
+  if (n > 0 && n < 0.001) return "< 0.001";
+  return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
+}
+
+function tsFromBlock(blockNumber) {
+  const b = Number(blockNumber || 0);
+  if (!b) return "";
+  return `#${b.toLocaleString()}`;
+}
+
+async function fetchJson(url, { method = "GET", body, timeoutMs = 15_000 } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: body ? { "content-type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text();
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+
+    if (!res.ok) {
+      const msg = json?.error || json?.message || text || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return json;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function copyToClipboard(text) {
+  const t = String(text || "");
+  if (!t) return false;
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "absolute";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function BlockSwap() {
-  const { walletAddress, isConnected, connectWallet } = useWallet();
+  const {
+    walletAddress,
+    isConnected,
+    chainId,
+    ensureChain,
+    connectMetaMask,
+    connectCoinbase,
+    connectWalletConnect,
+  } = useWallet();
+
   const { nickname, useNickname } = useNicknameContext();
   const { soundEnabled } = useSound();
 
   const ambienceRef = useRef(null);
+  const mountedRef = useRef(true);
+
+  // prevent overlapping refreshes
+  const refreshingRef = useRef(false);
+
+  // ✅ StrictMode guard (prevents double interval + double initial calls in dev)
+  const initOnceRef = useRef(false);
+
+  // ✅ Street polling timer ref
+  const streetTimerRef = useRef(null);
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
   const shortAddress = shortAddr(walletAddress);
 
   const [err, setErr] = useState("");
-  const [d, setD] = useState(() => blockswapAdapter.getSnapshot());
+  const [toast, setToast] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  // claim UI
-  const [claimRoundId, setClaimRoundId] = useState("");
-  const [claimMsg, setClaimMsg] = useState("");
+  const [snap, setSnap] = useState(null);
+  const [activity, setActivity] = useState([]);
+  const [holders, setHolders] = useState([]);
+  const [profileMap, setProfileMap] = useState({});
 
-  // keep snapshot fresh on mount
+  const [buyBricks, setBuyBricks] = useState(0);
+  const [buyOunces, setBuyOunces] = useState(0);
+
+  const [sellBricks, setSellBricks] = useState(0);
+  const [sellOunces, setSellOunces] = useState(0);
+
+  // ✅ diagnostic: what addresses are we actually reading?
+  const [resolved, setResolved] = useState(null);
+
+  // ✅ feed state
+  const [feedLoadedOnce, setFeedLoadedOnce] = useState(false);
+  const [feedErr, setFeedErr] = useState("");
+
+  // ✅ minor UI state
+  const [showContracts, setShowContracts] = useState(true);
+
+  const ozPerBrick = Number(C.OUNCES_PER_BRICK || 36);
+  const circulatingOz = (Number(C.BRICKS_AVAILABLE_FOR_SALE || 0) * ozPerBrick) || 0;
+
+  // ✅ TRUE GASLESS buy + feed powered by relayer:
+  const RELAYER_URL =
+    (import.meta.env.VITE_RELAYER_URL || "").trim() ||
+    (import.meta.env.VITE_BLOCK_RELAYER_URL || "").trim() ||
+    "";
+
+  // Tunables
+  const FEED_LIMIT = 15;
+  const FEED_POLL_MS = 90_000;
+  const HOLDERS_LIMIT = 250;
+
   useEffect(() => {
-    try {
-      setD(blockswapAdapter.getSnapshot());
-    } catch (e) {
-      setErr(e?.message || "Failed to load BlockSwap.");
-    }
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
-  const refresh = () => {
-    setErr("");
-    setClaimMsg("");
-    try {
-      setD(blockswapAdapter.getSnapshot());
-    } catch (e) {
-      setErr(e?.message || "Failed to refresh BlockSwap.");
-    }
-  };
-
-  const isAdmin = useMemo(() => {
-    if (!walletAddress) return false;
-    return (
-      String(walletAddress).toLowerCase() ===
-      String(d.ADMIN_WALLET).toLowerCase()
-    );
-  }, [walletAddress, d.ADMIN_WALLET]);
-
-  const ozPerBrick = d.ouncesPerBrick || 36;
-
-  // ✅ BLOCKSWAP AMBIENCE — obey master SoundContext toggle
+  // ✅ ambience obey SoundContext
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
     if (!ambienceRef.current) {
       const a = new Audio("/sounds/swapambience.m4a");
       a.loop = true;
@@ -91,6 +218,13 @@ export default function BlockSwap() {
     }
 
     const a = ambienceRef.current;
+
+    const safePauseReset = () => {
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch {}
+    };
 
     const tryPlay = () => {
       a.play().catch(() => {
@@ -107,20 +241,18 @@ export default function BlockSwap() {
     };
 
     if (soundEnabled) tryPlay();
-    else a.pause();
+    else safePauseReset();
 
-    return () => a.pause();
+    return () => safePauseReset();
   }, [soundEnabled]);
 
-  // Settlement stable symbol (locked to USDC in config/store, but read from snapshot)
-  const STABLE = d.STABLE_SYMBOL || "USDC";
+  const isAdmin = useMemo(() => {
+    if (!walletAddress) return false;
+    return String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET || "").toLowerCase();
+  }, [walletAddress]);
 
-  // ---- Inputs (integers only) ----
-  const [buyBricks, setBuyBricks] = useState(0);
-  const [buyOunces, setBuyOunces] = useState(0);
-
-  const [sellBricks, setSellBricks] = useState(0);
-  const [sellOunces, setSellOunces] = useState(0);
+  const STABLE = C.STABLE_SYMBOL || "USDC";
+  const TARGET_CHAIN_ID = Number(C.CHAIN_ID || 0);
 
   const buyTotalOz = useMemo(
     () => buyBricks * ozPerBrick + buyOunces,
@@ -132,246 +264,704 @@ export default function BlockSwap() {
     [sellBricks, sellOunces, ozPerBrick]
   );
 
-  const buyCost = useMemo(
-    () => (d ? buyTotalOz * (d.ounceSellPrice || 0) : 0),
-    [buyTotalOz, d]
-  );
+  // adapter returns: ounceSellPrice / ounceBuybackFloor
+  const buyPriceOz = Number(snap?.ounceSellPrice || 0);
+  const sellFloorOz = Number(snap?.ounceBuybackFloor || 0);
 
-  const sellProceeds = useMemo(
-    () => (d ? sellTotalOz * (d.ounceBuybackFloor || 0) : 0),
-    [sellTotalOz, d]
-  );
+  const buyPriceBrick = buyPriceOz ? buyPriceOz * ozPerBrick : 0;
+  const sellFloorBrick = sellFloorOz ? sellFloorOz * ozPerBrick : 0;
 
-  // ✅ new rules:
-  // - EarlyBird badge is marketing ONLY (d.earlyBirdBadge)
-  // - Buys can be paused (d.buyPaused) => real gate
-  const canBuy = !d.buyPaused && buyTotalOz > 0;
-  const canSell = sellTotalOz > 0;
+  const buyCost = useMemo(() => buyTotalOz * buyPriceOz, [buyTotalOz, buyPriceOz]);
+  const sellProceeds = useMemo(() => sellTotalOz * sellFloorOz, [sellTotalOz, sellFloorOz]);
 
-  // Build holders table from balances in state
-  const holderRows = useMemo(() => {
-    const balances = d.balancesOz || {};
-    const labels = d.labels || {};
+  const chainReady = Number(chainId) > 0;
+  const wrongChain =
+    isConnected &&
+    Number(TARGET_CHAIN_ID) > 0 &&
+    chainReady &&
+    Number(chainId) !== Number(TARGET_CHAIN_ID);
 
-    return Object.entries(balances)
-      .map(([addrLower, ounces]) => {
-        const ouncesNum = Number(ounces || 0);
-        const { b, o } = bricksOzFromTotal(ouncesNum, ozPerBrick);
+  const canBuy =
+    isConnected && !wrongChain && !snap?.buyPaused && buyTotalOz > 0 && !!RELAYER_URL;
 
-        const pctWeightCirculating = d.circulatingOz
-          ? (ouncesNum / d.circulatingOz) * 100
-          : 0;
+  const canSell = isConnected && !wrongChain && sellTotalOz > 0;
 
-        const label = labels[addrLower] || shortAddr(addrLower);
-        const isBrickHolder = ouncesNum >= ozPerBrick;
-
-        return {
-          address: addrLower,
-          label,
-          ounces: ouncesNum,
-          weightLabel: `${b} brick${b === 1 ? "" : "s"} ${o} oz`,
-          pctWeightCirculating,
-          isBrickHolder,
-        };
-      })
-      .sort((a, b) => b.ounces - a.ounces);
-  }, [d.balancesOz, d.labels, d.circulatingOz, ozPerBrick]);
-
-  // ✅ Street Activity feed (newest first)
-  const streetActivity = useMemo(() => {
-    const raw = Array.isArray(d.activity) ? d.activity : [];
-    return raw
-      .map((x) => ({
-        text: String(x?.text ?? ""),
-        ts: String(x?.ts ?? ""),
-      }))
-      .filter((x) => x.text);
-  }, [d.activity]);
-
-  // Rewards helpers
-  const myAddr = String(walletAddress || "").toLowerCase();
-  const myOz = Number((d.balancesOz || {})[myAddr] || 0);
-  const myClaimedTotal = Number((d.claimedRewardsStable || {})[myAddr] || 0);
-
-  const rewardRounds = useMemo(() => {
-    const rounds = Array.isArray(d.rewardRounds) ? d.rewardRounds : [];
-    return rounds.slice(); // newest-first already
-  }, [d.rewardRounds]);
-
-  const connectOrWarn = async () => {
+  async function upsertMyProfile() {
     try {
-      setErr("");
-      await connectWallet?.();
-      refresh();
+      if (!supabase) return;
+      if (!walletAddress) return;
+
+      const addr = String(walletAddress).toLowerCase();
+      const nick = String(nickname || "").trim();
+
+      const payload = {
+        chain_id: Number(C.CHAIN_ID || 0),
+        address: addr,
+        nickname: nick || null,
+      };
+
+      const { error } = await supabase
+        .from("profiles")
+        .upsert(payload, { onConflict: "chain_id,address" });
+
+      if (error) console.warn("Supabase upsert profile error:", error?.message || error);
     } catch (e) {
-      setErr(e?.message || "Wallet connect failed.");
+      console.warn("Supabase upsert profile exception:", e?.message || e);
     }
-  };
+  }
 
-  const handleBuy = () => {
-    setErr("");
-    setClaimMsg("");
+  async function fetchProfilesForAddresses(addresses) {
+    if (!supabase) return {};
+    const list = (Array.isArray(addresses) ? addresses : [])
+      .map((a) => String(a || "").toLowerCase())
+      .filter(Boolean);
+
+    if (!list.length) return {};
+
+    const batches = chunk(list, 200);
+    const nextMap = {};
+
+    for (const batch of batches) {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("address,nickname")
+        .eq("chain_id", Number(C.CHAIN_ID || 0))
+        .in("address", batch);
+
+      if (error) {
+        console.warn("Supabase fetch profiles error:", error?.message || error);
+        continue;
+      }
+
+      (data || []).forEach((row) => {
+        if (!row?.address) return;
+        nextMap[String(row.address).toLowerCase()] = { nickname: row.nickname || null };
+      });
+    }
+
+    return nextMap;
+  }
+
+  // ✅ Snapshot refresh strategy (safe — no logs)
+  async function refreshSnapshot({ silent = false } = {}) {
+    if (!mountedRef.current) return;
+    if (refreshingRef.current) return;
+
+    refreshingRef.current = true;
+
+    if (!silent) {
+      setErr("");
+      setToast("");
+      setLoading(true);
+    }
+
     try {
-      if (!walletAddress) throw new Error("Connect wallet first.");
-      if (d.buyPaused) throw new Error("Buys are paused by admin right now.");
+      const addr = await blockswapAdapter.getResolvedAddresses();
+      if (mountedRef.current) setResolved(addr || null);
 
-      const label = getDisplayName({ walletAddress, nickname, useNickname });
+      const s = await blockswapAdapter.getSwapSnapshot();
+      if (mountedRef.current) setSnap(s || null);
+    } catch (e) {
+      if (mountedRef.current) {
+        setErr(e?.shortMessage || e?.message || "Failed to load BlockSwap.");
+      }
+    } finally {
+      if (!silent && mountedRef.current) setLoading(false);
+      refreshingRef.current = false;
+    }
+  }
 
-      const snap = blockswapAdapter.buy({
-        walletAddress,
-        ounces: buyTotalOz,
-        label,
+  // ✅ Feed strategy: pull from relayer endpoints (not browser RPC logs)
+  async function refreshFeed({ silent = true } = {}) {
+    if (!RELAYER_URL) return;
+
+    const base = RELAYER_URL.replace(/\/+$/, "");
+    if (!silent) setFeedErr("");
+
+    const act = await fetchJson(`${base}/feed/activity?limit=${FEED_LIMIT}`, {
+      timeoutMs: 15_000,
+    });
+    const hol = await fetchJson(`${base}/feed/holders?limit=${HOLDERS_LIMIT}`, {
+      timeoutMs: 15_000,
+    });
+
+    const rowsA = Array.isArray(act?.rows) ? act.rows : [];
+    const rowsH = Array.isArray(hol?.rows) ? hol.rows : [];
+
+    if (!mountedRef.current) return;
+
+    setActivity(rowsA);
+    setHolders(rowsH);
+    setFeedLoadedOnce(true);
+
+    const addrs = rowsH.map((h) => h?.wallet).filter(Boolean);
+    if (addrs.length) {
+      const map = await fetchProfilesForAddresses(addrs);
+      if (mountedRef.current) setProfileMap((prev) => ({ ...prev, ...map }));
+    }
+  }
+
+  function startFeedPolling() {
+    if (!RELAYER_URL) return;
+    if (streetTimerRef.current) return;
+
+    // best-effort
+    refreshFeed({ silent: true })
+      .then(() => {
+        if (mountedRef.current) setFeedErr("");
+      })
+      .catch((e) => {
+        if (mountedRef.current) setFeedErr(e?.message || "Feed unavailable.");
       });
 
-      setD(snap);
+    streetTimerRef.current = setInterval(() => {
+      refreshFeed({ silent: true })
+        .then(() => {
+          if (mountedRef.current) setFeedErr("");
+        })
+        .catch((e) => {
+          if (mountedRef.current) setFeedErr(e?.message || "Feed unavailable.");
+        });
+    }, FEED_POLL_MS);
+  }
+
+  function stopFeedPolling() {
+    if (streetTimerRef.current) {
+      clearInterval(streetTimerRef.current);
+      streetTimerRef.current = null;
+    }
+  }
+
+  // Initial snapshot polling (safe)
+  useEffect(() => {
+    if (initOnceRef.current) return;
+    initOnceRef.current = true;
+
+    refreshSnapshot({ silent: false }).catch(() => {});
+
+    // ✅ Auto-start feed polling if relayer exists (no “extra buttons” needed)
+    startFeedPolling();
+
+    const t = setInterval(() => {
+      refreshSnapshot({ silent: true }).catch(() => {});
+    }, 20_000);
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        refreshSnapshot({ silent: true }).catch(() => {});
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
+      stopFeedPolling();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If relayer url toggles on (env change / rebuild), begin polling
+  useEffect(() => {
+    if (RELAYER_URL) startFeedPolling();
+    else stopFeedPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [RELAYER_URL]);
+
+  // Supabase nickname upsert
+  useEffect(() => {
+    if (!isConnected) return;
+    if (!walletAddress) return;
+    upsertMyProfile().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected, walletAddress, nickname]);
+
+  // ✅ Gasless buy ONLY
+  const handleBuy = async () => {
+    setErr("");
+    setToast("");
+    try {
+      if (!walletAddress) throw new Error("Connect wallet first.");
+      if (wrongChain) throw new Error(`Wrong network. Switch to chain ${TARGET_CHAIN_ID}.`);
+      if (snap?.buyPaused) throw new Error("Buys are paused right now.");
+      if (buyTotalOz <= 0) throw new Error("Enter an amount to buy.");
+      if (!RELAYER_URL) {
+        throw new Error("Relayer is not configured. Buys are gasless-only in this build.");
+      }
+
+      setLoading(true);
+
+      const res = await blockswapAdapter.buyOzGasless({
+        walletAddress,
+        ouncesWhole: String(buyTotalOz),
+      });
+
+      if (res?.hash) await blockswapAdapter.waitForTx(res.hash);
+
+      setToast("Buy confirmed ✅");
       setBuyBricks(0);
       setBuyOunces(0);
+
+      await upsertMyProfile();
+      await refreshSnapshot({ silent: true });
+
+      // best-effort feed refresh (won't block)
+      refreshFeed({ silent: true }).catch(() => {});
     } catch (e) {
-      setErr(e?.message || "Buy failed.");
+      setErr(e?.shortMessage || e?.message || "Buy failed.");
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleSell = () => {
+  const handleSell = async () => {
     setErr("");
-    setClaimMsg("");
+    setToast("");
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
+      if (wrongChain) throw new Error(`Wrong network. Switch to chain ${TARGET_CHAIN_ID}.`);
+      if (sellTotalOz <= 0) throw new Error("Enter an amount to sell back.");
 
-      const snap = blockswapAdapter.sellBack({
+      setLoading(true);
+
+      const res = await blockswapAdapter.sellBackOz({
         walletAddress,
-        ounces: sellTotalOz,
+        ouncesWhole: String(sellTotalOz),
       });
 
-      setD(snap);
+      if (res?.approveHash) await blockswapAdapter.waitForTx(res.approveHash);
+      const finalHash = res?.sellHash || res?.hash;
+      if (finalHash) await blockswapAdapter.waitForTx(finalHash);
+
+      setToast("Sell back confirmed ✅");
       setSellBricks(0);
       setSellOunces(0);
+
+      await upsertMyProfile();
+      await refreshSnapshot({ silent: true });
+
+      refreshFeed({ silent: true }).catch(() => {});
     } catch (e) {
-      setErr(e?.message || "Sell back failed.");
+      setErr(e?.shortMessage || e?.message || "Sell back failed.");
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleClaim = (rid) => {
-    setErr("");
-    setClaimMsg("");
-    try {
-      if (!walletAddress) throw new Error("Connect wallet to claim.");
-      const snap = blockswapAdapter.claimReward({
-        walletAddress,
-        roundId: rid,
-      });
-      setD(snap);
-      setClaimMsg(`Claim submitted ✅ Round #${rid}`);
-    } catch (e) {
-      setErr(e?.message || "Claim failed.");
-    }
+  const buyStatusLabel = snap?.buyPaused ? "PAUSED" : "LIVE";
+  const supabaseStatus = supabase ? "ON" : "OFF";
+
+  const vault = snap?.fmt?.vault ?? snap?.fmt?.swapUsdc ?? "—";
+  const treasury =
+    snap?.fmt?.treasuryUsdc ?? snap?.fmt?.treasuryUSDC ?? snap?.fmt?.treasury ?? "—";
+
+  const swapOzInvRaw = snap?.fmt?.ozInventory ?? snap?.fmt?.swapOz ?? "—";
+  const swapOzInvPretty = swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
+
+  const inventoryLooksSuspicious =
+    String(swapOzInvRaw) !== "—" && Number(swapOzInvRaw) === 0 && snap?.sellPricePerBrick;
+
+  // ✅ UI-ready street rows
+  const streetActivity = useMemo(() => {
+    const rows = Array.isArray(activity) ? activity : [];
+    return rows
+      .map((x) => {
+        const kind = x?.event_type || x?.kind || x?.type || "";
+        const who = x?.wallet || x?.who || "";
+        const ozWei = x?.oz_wei ?? x?.ozWei ?? x?.oz ?? 0;
+        const usdc6 = x?.usdc_6 ?? x?.usdc ?? 0;
+        const blk = tsFromBlock(x?.block_number || x?.blockNumber);
+
+        const oz = Number(ozWei) / 1e18;
+        const usdc = Number(usdc6) / 1e6;
+
+        const whoLabel = shortAddr(who);
+
+        const ozLabel = oz.toLocaleString(undefined, { maximumFractionDigits: 6 });
+        const usdcLabel = usdc.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+        const text =
+          kind === "BUY"
+            ? `BUY • ${whoLabel} bought ${ozLabel} oz for ${usdcLabel} ${STABLE}`
+            : kind === "SELLBACK"
+            ? `SELLBACK • ${whoLabel} sold ${ozLabel} oz for ${usdcLabel} ${STABLE}`
+            : `TX • ${whoLabel}`;
+
+        return { text, ts: blk };
+      })
+      .filter((x) => x?.text);
+  }, [activity, STABLE]);
+
+  // ✅ holders already normalized from relayer
+  const holderRows = useMemo(() => {
+    const raw = Array.isArray(holders) ? holders : [];
+
+    const normalized = raw.map((h) => {
+      const address = h?.wallet || "";
+      const ouncesNum = Number(h?.oz_wei || 0) / 1e18;
+
+      const { b, o } = bricksOzFromTotal(Math.floor(ouncesNum), ozPerBrick);
+      const pct = circulatingOz ? (ouncesNum / circulatingOz) * 100 : 0;
+
+      const addrLower = String(address || "").toLowerCase();
+      const supaNick = profileMap?.[addrLower]?.nickname || null;
+
+      return {
+        address,
+        display: supaNick ? `${supaNick} (${shortAddr(address)})` : shortAddr(address),
+        ounces: ouncesNum,
+        weightLabel: `${b} brick${b === 1 ? "" : "s"} ${o} oz`,
+        pctWeightCirculating: pct,
+        isBrickHolder: ouncesNum >= ozPerBrick,
+      };
+    });
+
+    return normalized
+      .filter((x) => x.address)
+      .sort((a, b) => b.ounces - a.ounces);
+  }, [holders, ozPerBrick, circulatingOz, profileMap]);
+
+  const HeaderPill = ({ children, tone = "slate", title }) => {
+    const base =
+      "rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide whitespace-nowrap";
+    const tones = {
+      slate: "border-slate-700/60 bg-slate-900/40 text-slate-300",
+      emerald: "border-emerald-400/30 bg-emerald-500/10 text-emerald-200",
+      rose: "border-rose-400/30 bg-rose-500/10 text-rose-200",
+      indigo: "border-indigo-400/30 bg-indigo-500/10 text-indigo-200",
+      sky: "border-sky-400/30 bg-sky-500/10 text-sky-200",
+      amber: "border-amber-400/30 bg-amber-500/10 text-amber-200",
+    };
+    return (
+      <span className={`${base} ${tones[tone] || tones.slate}`} title={title}>
+        {children}
+      </span>
+    );
   };
 
-  const buybackVault = Number(d.buybackVault || 0);
-  const theBlockTreasury = Number(d.theBlockTreasury || 0);
-  const buybackCapacityOz = Number(d.buybackCapacityOz || 0);
+  const ConnectDropdown = () => {
+    return (
+      <details className="relative">
+        <summary className="cursor-pointer list-none rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400">
+          Connect
+        </summary>
 
-  const buyStatusLabel = d.buyPaused ? "PAUSED" : "LIVE";
+        <div className="absolute right-0 z-20 mt-2 w-44 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
+          <button
+            onClick={async () => {
+              try {
+                setErr("");
+                await connectMetaMask?.();
+              } catch (e) {
+                setErr(e?.message || "MetaMask connect failed.");
+              }
+            }}
+            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+            type="button"
+          >
+            MetaMask
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                setErr("");
+                await connectCoinbase?.();
+              } catch (e) {
+                setErr(e?.message || "Coinbase connect failed.");
+              }
+            }}
+            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+            type="button"
+          >
+            Coinbase
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                setErr("");
+                await connectWalletConnect?.();
+              } catch (e) {
+                setErr(e?.message || "WalletConnect failed.");
+              }
+            }}
+            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+            type="button"
+          >
+            WalletConnect
+          </button>
+
+          <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
+            You can switch later.
+          </div>
+        </div>
+      </details>
+    );
+  };
+
+  const ContractRow = ({ label, value }) => {
+    const v = value || "";
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase text-slate-500">{label}</div>
+          <div className="truncate font-mono text-xs text-slate-200">
+            {v ? v : "—"}
+            {v ? <span className="ml-2 text-slate-500">({shortAddr(v)})</span> : null}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="shrink-0 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200 hover:border-slate-500 disabled:opacity-50"
+          disabled={!v}
+          onClick={async () => {
+            const ok = await copyToClipboard(v);
+            if (ok) setToast("Copied ✅");
+          }}
+          title="Copy address"
+        >
+          Copy
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
-      <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4">
-          <div className="flex items-baseline gap-2">
-            <span className="text-lg font-semibold tracking-wide">The Block</span>
-
-            <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">
-              BlockSwap
-            </span>
-
-            {d.earlyBirdBadge ? (
-              <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-amber-200">
-                Early Bird
+      {/* Header (clean + mobile-friendly) */}
+      <header className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/85 backdrop-blur">
+        <div className="mx-auto max-w-6xl px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-lg font-semibold tracking-wide">The Block</span>
+              <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">
+                BlockSwap
               </span>
-            ) : null}
 
-            <span
-              className={
-                "rounded-full border px-2 py-0.5 text-xs uppercase tracking-wide " +
-                (d.buyPaused
-                  ? "border-rose-400/30 bg-rose-500/10 text-rose-200"
-                  : "border-emerald-400/30 bg-emerald-500/10 text-emerald-200")
-              }
-              title="Buys are controlled by admin pause"
-            >
-              Buys: {buyStatusLabel}
-            </span>
+              <HeaderPill
+                tone={snap?.buyPaused ? "rose" : "emerald"}
+                title="Buys can be paused by admin"
+              >
+                Buys: {buyStatusLabel}
+              </HeaderPill>
 
-            {isAdmin ? (
-              <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-0.5 text-xs uppercase tracking-wide text-sky-200">
-                Admin
-              </span>
-            ) : null}
+              <HeaderPill
+                tone={RELAYER_URL ? "emerald" : "rose"}
+                title={RELAYER_URL ? "Relayer enabled (gasless buy + feed)" : "Relayer missing"}
+              >
+                Gasless: {RELAYER_URL ? "ON" : "OFF"}
+              </HeaderPill>
+
+              {isAdmin ? <HeaderPill tone="sky">Admin</HeaderPill> : null}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <HeaderPill tone="slate" title="Settlement stablecoin">
+                Settlement: {STABLE}
+              </HeaderPill>
+
+              {isConnected ? (
+                <>
+                  <HeaderPill tone={wrongChain ? "rose" : "slate"} title="Connected wallet">
+                    {displayName} ({shortAddress})
+                  </HeaderPill>
+
+                  {wrongChain && ensureChain ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          setErr("");
+                          await ensureChain(TARGET_CHAIN_ID);
+                        } catch (e) {
+                          setErr(e?.message || "Failed to switch network.");
+                        }
+                      }}
+                      className="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-rose-400"
+                    >
+                      Switch Network
+                    </button>
+                  ) : null}
+                </>
+              ) : (
+                <ConnectDropdown />
+              )}
+
+              <button
+                onClick={() => refreshSnapshot({ silent: false })}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500"
+                type="button"
+                title="Refresh on-chain snapshot"
+              >
+                Refresh
+              </button>
+
+              <button
+                onClick={() => setShowContracts((v) => !v)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500"
+                type="button"
+                title="Show / hide contract addresses"
+              >
+                {showContracts ? "Hide contracts" : "Show contracts"}
+              </button>
+
+              <Link
+                to="/"
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500"
+              >
+                Home
+              </Link>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-300">
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-medium">
-              Settlement: {STABLE}
-            </span>
+          {/* Lightweight status strip */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-500">Network:</span>
+              <span className="font-mono text-slate-300">
+                {TARGET_CHAIN_ID ? `chainId ${TARGET_CHAIN_ID}` : "—"}
+              </span>
+              {supabase ? (
+                <span className="text-slate-500">
+                  Nicknames: <span className="text-slate-300">ON</span>
+                </span>
+              ) : (
+                <span className="text-slate-500">
+                  Nicknames: <span className="text-slate-300">OFF</span>
+                </span>
+              )}
+            </div>
 
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-xs">
-              {isConnected ? `${displayName} (${shortAddress})` : "Not connected"}
-            </span>
-
-            {!isConnected ? (
-              <button
-                onClick={connectOrWarn}
-                className="rounded-lg bg-sky-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-sky-400"
-                type="button"
-              >
-                Connect Wallet
-              </button>
-            ) : null}
-
-            <Link
-              to="/"
-              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
-            >
-              Home
-            </Link>
-
-            <Link
-              to="/investor"
-              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
-            >
-              Inside the Hustle
-            </Link>
+            <div className="text-slate-500">
+              {RELAYER_URL ? (
+                <>
+                  Activity refresh ~<span className="font-mono">{Math.round(FEED_POLL_MS / 1000)}</span>s
+                </>
+              ) : (
+                <>Relayer not configured</>
+              )}
+            </div>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-4 pb-16 pt-8">
+      <main className="mx-auto max-w-6xl px-4 pb-16 pt-6">
+        {/* Notices */}
+        {wrongChain ? (
+          <div className="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            Wallet is on the wrong network (current:{" "}
+            <span className="font-mono">{String(chainId || "?")}</span>). Switch to chain{" "}
+            <span className="font-mono">{TARGET_CHAIN_ID}</span>.
+          </div>
+        ) : null}
+
         {err ? (
-          <div className="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          <div className="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
             {err}
           </div>
         ) : null}
 
-        {claimMsg ? (
-          <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-            {claimMsg}
+        {toast ? (
+          <div className="mb-5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+            {toast}
           </div>
         ) : null}
 
-        {/* Admin Panel */}
-        <BlockSwapAdminPanel
-          walletAddress={walletAddress}
-          d={d}
-          onUpdated={(snap) => setD(snap)}
-        />
+        {loading ? (
+          <div className="mb-5 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-sm text-slate-300">
+            Working… (pulling chain / feed data)
+          </div>
+        ) : null}
 
-        {/* Trade + Right column */}
+        {feedErr ? (
+          <div className="mb-5 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            Activity feed is temporarily unavailable: <span className="text-amber-100">{feedErr}</span>
+          </div>
+        ) : null}
+
+        {/* Contracts / Diagnostics (keep addresses for trust) */}
+        {showContracts ? (
+          <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Contracts & Diagnostics
+              </div>
+              <div className="text-[11px] text-slate-500">
+                RPC:{" "}
+                <span className="font-mono text-slate-400">
+                  {import.meta.env.VITE_RPC_URL || "(default)"}
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-3 grid gap-2 md:grid-cols-3">
+              <ContractRow label="BlockSwap" value={resolved?.SWAP} />
+              <ContractRow label="OZ token" value={resolved?.OZ} />
+              <ContractRow label="USDC token" value={resolved?.USDC} />
+            </div>
+
+            {!RELAYER_URL ? (
+              <div className="mt-3 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                Gasless buys + activity feed are OFF because{" "}
+                <span className="font-mono">VITE_RELAYER_URL</span> is missing.
+              </div>
+            ) : null}
+
+            {inventoryLooksSuspicious ? (
+              <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                OZ inventory reads <span className="font-mono">0</span> but pricing loaded. If RPC is flaky,
+                balances can fail to load.
+              </div>
+            ) : null}
+
+            {!supabase ? (
+              <div className="mt-3 text-[0.75rem] text-slate-500">
+                Nicknames are optional. Add{" "}
+                <span className="font-mono">VITE_SUPABASE_URL</span> and{" "}
+                <span className="font-mono">VITE_SUPABASE_ANON_KEY</span> to{" "}
+                <span className="font-mono">.env.local</span> to display names in the holders list.
+              </div>
+            ) : (
+              <div className="mt-3 text-[0.75rem] text-slate-500">
+                Nicknames: <span className="font-mono">ON</span> • Users can set a display name.
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {/* Admin panel (collapse it; public-friendly) */}
+        {isAdmin ? (
+          <details className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+            <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">
+              Admin controls
+              <span className="ml-2 text-xs font-normal text-slate-500">
+                (only visible to admin wallet)
+              </span>
+            </summary>
+
+            <div className="mt-4">
+              <BlockSwapAdminPanel
+                walletAddress={walletAddress}
+                adminWallet={C.ADMIN_WALLET}
+                chainId={chainId}
+                targetChainId={TARGET_CHAIN_ID}
+                ensureChain={ensureChain}
+                stableSymbol={STABLE}
+                onRefresh={(maybeSnap) => {
+                  if (maybeSnap && typeof maybeSnap === "object") setSnap(maybeSnap);
+                  else refreshSnapshot({ silent: true });
+                }}
+              />
+            </div>
+          </details>
+        ) : null}
+
+        {/* Main grid */}
         <section className="grid gap-6 lg:grid-cols-[1.4fr,1fr]">
-          {/* Trade */}
+          {/* Left: Trade + Activity */}
           <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Trade
-              </h2>
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Trade</h2>
               <span className="text-xs text-slate-400">1 brick = {ozPerBrick} oz</span>
             </div>
 
@@ -380,19 +970,33 @@ export default function BlockSwap() {
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    Buy
+                    Buy (Gasless)
                   </div>
-
                   <span
                     className={
                       "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
-                      (d.buyPaused
+                      (snap?.buyPaused
                         ? "bg-rose-500/15 text-rose-200"
                         : "bg-emerald-500/15 text-emerald-200")
                     }
                   >
-                    {d.buyPaused ? "PAUSED" : "LIVE"}
+                    {snap?.buyPaused ? "PAUSED" : "LIVE"}
                   </span>
+                </div>
+
+                <div className="mb-3 space-y-1 text-xs text-slate-400">
+                  <div className="flex justify-between">
+                    <span>Price / oz</span>
+                    <span className="font-mono text-slate-100">
+                      {buyPriceOz ? buyPriceOz.toFixed(6) : "—"} {STABLE}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Price / brick</span>
+                    <span className="font-mono text-slate-100">
+                      {buyPriceBrick ? buyPriceBrick.toFixed(2) : "—"} {STABLE}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -414,7 +1018,7 @@ export default function BlockSwap() {
                         setBuyOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                      disabled={d.buyPaused}
+                      disabled={!!snap?.buyPaused || loading || wrongChain || !RELAYER_URL}
                     />
                   </div>
 
@@ -436,7 +1040,7 @@ export default function BlockSwap() {
                         setBuyOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                      disabled={d.buyPaused}
+                      disabled={!!snap?.buyPaused || loading || wrongChain || !RELAYER_URL}
                     />
                     <div className="mt-1 text-[0.65rem] text-slate-500">
                       Auto-carries into bricks (0–{ozPerBrick - 1} shown).
@@ -459,32 +1063,40 @@ export default function BlockSwap() {
 
                 <button
                   className="mt-4 w-full rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canBuy || !isConnected}
+                  disabled={!canBuy || loading}
                   onClick={handleBuy}
                   type="button"
+                  title={!RELAYER_URL ? "Relayer required for gasless buy" : "Gasless buy"}
                 >
                   Buy
                 </button>
 
-                {!isConnected ? (
-                  <p className="mt-2 text-[0.7rem] text-slate-500">
-                    Connect your wallet to buy.
-                  </p>
-                ) : d.buyPaused ? (
-                  <p className="mt-2 text-[0.7rem] text-rose-200/80">
-                    Buys are paused by admin right now.
-                  </p>
-                ) : (
-                  <p className="mt-2 text-[0.7rem] text-slate-500">
-                    Demo mode now — contract wiring comes next.
-                  </p>
-                )}
+                {!RELAYER_URL ? (
+                  <div className="mt-3 text-[0.7rem] leading-relaxed text-slate-500">
+                    Gasless buy requires the relayer. (Set <span className="font-mono">VITE_RELAYER_URL</span>.)
+                  </div>
+                ) : null}
               </div>
 
               {/* SELLBACK */}
               <div className="rounded-xl border border-emerald-500/30 bg-slate-950/60 p-4">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-300">
-                  Sell Back
+                  Sell Back (Floor)
+                </div>
+
+                <div className="mb-3 space-y-1 text-xs text-slate-400">
+                  <div className="flex justify-between">
+                    <span>Floor / oz</span>
+                    <span className="font-mono text-emerald-200">
+                      {sellFloorOz ? sellFloorOz.toFixed(6) : "—"} {STABLE}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Floor / brick</span>
+                    <span className="font-mono text-emerald-200">
+                      {sellFloorBrick ? sellFloorBrick.toFixed(2) : "—"} {STABLE}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -506,6 +1118,7 @@ export default function BlockSwap() {
                         setSellOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
+                      disabled={loading || wrongChain}
                     />
                   </div>
 
@@ -527,6 +1140,7 @@ export default function BlockSwap() {
                         setSellOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
+                      disabled={loading || wrongChain}
                     />
                     <div className="mt-1 text-[0.65rem] text-slate-500">
                       Auto-carries into bricks (0–{ozPerBrick - 1} shown).
@@ -549,33 +1163,27 @@ export default function BlockSwap() {
 
                 <button
                   className="mt-4 w-full rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canSell || !isConnected}
+                  disabled={!isConnected || wrongChain || sellTotalOz <= 0 || loading}
                   onClick={handleSell}
                   type="button"
                 >
                   Sell Back
                 </button>
 
-                {!isConnected ? (
-                  <p className="mt-2 text-[0.7rem] text-slate-500">
-                    Connect your wallet to sell back.
-                  </p>
-                ) : (
-                  <p className="mt-2 text-[0.7rem] text-emerald-200/80">
-                    Sellback stays available (limited by vault funds).
-                  </p>
-                )}
+                <p className="mt-3 text-[0.7rem] leading-relaxed text-slate-500">
+                  Sell back uses the on-chain floor price (when available).
+                </p>
               </div>
             </div>
 
             {/* Street Activity */}
             <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
                   Street Activity
                 </h3>
                 <span className="text-[0.7rem] text-slate-500">
-                  Buys • Sellbacks • Vault feeds • Rewards
+                  Last {FEED_LIMIT} events • refresh ~{Math.round(FEED_POLL_MS / 1000)}s
                 </span>
               </div>
 
@@ -592,193 +1200,99 @@ export default function BlockSwap() {
                   ))
                 ) : (
                   <li className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-3 text-slate-500">
-                    No activity yet. First buys / sells will show up here.
+                    {RELAYER_URL
+                      ? feedLoadedOnce
+                        ? "No recent activity yet."
+                        : "Waiting for feed data…"
+                      : "Relayer not configured. Activity feed is unavailable."}
                   </li>
                 )}
               </ul>
 
-              <p className="mt-2 text-[0.7rem] text-slate-500">
-                Demo mode updates on Refresh / Buy / Sell / Admin changes.
-              </p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[0.7rem] text-slate-500">
+                  Powered by the relayer indexer (event feed).
+                </div>
+
+                {DEBUG_LOGS ? (
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1 text-[11px] font-semibold text-slate-200 hover:border-slate-500 disabled:opacity-50"
+                    disabled={!RELAYER_URL}
+                    onClick={async () => {
+                      try {
+                        if (!RELAYER_URL) throw new Error("No relayer URL.");
+                        setErr("");
+                        setToast("");
+                        setLoading(true);
+                        const base = RELAYER_URL.replace(/\/+$/, "");
+                        await fetchJson(`${base}/admin/sync`, {
+                          method: "POST",
+                          body: {},
+                          timeoutMs: 60_000,
+                        });
+                        await refreshFeed({ silent: false });
+                        setToast("Relayer sync triggered ✅");
+                      } catch (e) {
+                        setErr(e?.message || "Sync failed.");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    title="Dev helper"
+                  >
+                    Dev Sync
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
 
-          {/* Right Column */}
+          {/* Right: Proof of funds */}
           <div className="space-y-4">
-            {/* Vaults */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Vaults & Contract
+                Proof of Funds
               </h3>
 
               <dl className="mt-4 space-y-3 text-sm">
                 <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Buyback Vault</dt>
-                  <dd className="text-right font-mono text-emerald-200">
-                    {buybackVault.toLocaleString()} {STABLE}
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      Instant capacity: {buybackCapacityOz.toLocaleString()} oz
-                    </div>
-                  </dd>
+                  <dt className="text-slate-400">Buyback Vault ({STABLE})</dt>
+                  <dd className="text-right font-mono text-emerald-200">{vault}</dd>
                 </div>
 
                 <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">TheBlock Treasury</dt>
-                  <dd className="text-right font-mono text-sky-300">
-                    {theBlockTreasury.toLocaleString()} {STABLE}
-                    <div className="mt-1 text-xs font-normal text-slate-500">
-                      Ops + growth + milestones
-                    </div>
-                  </dd>
+                  <dt className="text-slate-400">Treasury ({STABLE})</dt>
+                  <dd className="text-right font-mono text-slate-200">{treasury}</dd>
                 </div>
 
                 <div className="flex items-start justify-between gap-4">
-                  <dt className="text-slate-400">Contract</dt>
-                  <dd className="text-right text-slate-300">
-                    <span className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1 text-xs">
-                      coming soon
-                    </span>
-                  </dd>
+                  <dt className="text-slate-400">OZ Inventory</dt>
+                  <dd className="text-right font-mono text-slate-200">{swapOzInvPretty}</dd>
                 </div>
               </dl>
 
               <p className="mt-4 text-[0.75rem] leading-relaxed text-slate-500">
-                We’ll drop the live contract address right here when it’s deployed on Base.
+                Vault is reserved for floor sell-backs. Treasury supports operations and future districts.
+                OZ inventory is what’s available to buy.
               </p>
             </div>
 
-            {/* Rewards Claim */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Rewards / Claims
+                Quick Notes
               </h3>
-
-              <div className="mt-3 grid gap-2 text-sm">
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-slate-400">Your balance</span>
-                  <span className="font-mono text-slate-200">{myOz.toLocaleString()} oz</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-slate-400">Claimed total</span>
-                  <span className="font-mono text-emerald-200">
-                    {myClaimedTotal.toFixed(2)} {STABLE}
-                  </span>
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <input
-                  value={claimRoundId}
-                  onChange={(e) => setClaimRoundId(e.target.value)}
-                  placeholder="Round # (ex: 1)"
-                  className="w-44 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
-                />
-
-                <button
-                  type="button"
-                  onClick={() => handleClaim(claimRoundId)}
-                  disabled={!isConnected || !String(claimRoundId).trim()}
-                  className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Claim
-                </button>
-
-                <button
-                  onClick={refresh}
-                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:border-slate-500"
-                  type="button"
-                >
-                  Refresh
-                </button>
-              </div>
-
-              <p className="mt-3 text-[0.75rem] text-slate-500">
-                Demo mode: claims update local state. On-chain version will be Merkle claim with a 180-day window.
-              </p>
-
-              {/* Recent rounds */}
-              <div className="mt-4">
-                <div className="mb-2 text-xs uppercase tracking-wide text-slate-400">
-                  Recent rounds
-                </div>
-
-                {rewardRounds.length ? (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-left text-xs">
-                      <thead className="border-b border-slate-800 text-slate-400">
-                        <tr>
-                          <th className="py-2 pr-3">Round</th>
-                          <th className="py-2 pr-3 text-right">Pool</th>
-                          <th className="py-2 pr-3 text-right">Per Oz</th>
-                          <th className="py-2 pr-3 text-right">Eligible Oz</th>
-                          <th className="py-2 pr-3">Claim End</th>
-                          <th className="py-2 pr-3 text-right">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rewardRounds.slice(0, 5).map((r) => {
-                          const rid = Number(r?.id || 0);
-                          const claimEndMs = Number(r?.claimEndMs || 0);
-                          const ended = Date.now() > claimEndMs;
-
-                          const snapshot = r?.snapshotBalancesOz || {};
-                          const eligibleOz = Number(snapshot[myAddr] || 0);
-                          const already = !!(r?.claimed && r.claimed[myAddr]);
-
-                          const can =
-                            isConnected && !ended && eligibleOz > 0 && !already;
-
-                          return (
-                            <tr key={rid} className="border-b border-slate-800/60">
-                              <td className="py-2 pr-3 font-mono text-slate-200">#{rid}</td>
-                              <td className="py-2 pr-3 text-right font-mono text-slate-200">
-                                {Number(r?.totalPoolStable || 0).toFixed(2)} {STABLE}
-                              </td>
-                              <td className="py-2 pr-3 text-right font-mono text-sky-300">
-                                {Number(r?.rewardPerOz || 0).toFixed(6)}
-                              </td>
-                              <td className="py-2 pr-3 text-right font-mono text-slate-200">
-                                {Number(r?.snapshotTotalEligibleOz || 0).toLocaleString()}
-                              </td>
-                              <td className="py-2 pr-3 text-slate-400">
-                                {claimEndMs ? new Date(claimEndMs).toLocaleDateString() : "—"}
-                              </td>
-                              <td className="py-2 pr-3 text-right">
-                                {already ? (
-                                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200">
-                                    Claimed
-                                  </span>
-                                ) : ended ? (
-                                  <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">
-                                    Ended
-                                  </span>
-                                ) : eligibleOz <= 0 ? (
-                                  <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">
-                                    Not eligible
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleClaim(rid)}
-                                    disabled={!can}
-                                    className="rounded-lg bg-emerald-500 px-2 py-1 text-[11px] font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
-                                  >
-                                    Claim
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-[0.75rem] text-slate-500">
-                    No reward rounds created yet.
-                  </div>
-                )}
-              </div>
+              <ul className="mt-3 space-y-2 text-sm text-slate-300">
+                <li className="text-slate-400">
+                  • You’re buying <span className="text-slate-200">OZ</span> (shown as bricks + ounces for readability).
+                </li>
+                <li className="text-slate-400">
+                  • Brick = <span className="font-mono text-slate-200">{ozPerBrick}</span> oz.
+                </li>
+                <li className="text-slate-400">
+                  • Sell back uses the on-chain floor price when available.
+                </li>
+              </ul>
             </div>
           </div>
         </section>
@@ -787,10 +1301,10 @@ export default function BlockSwap() {
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
-              Holders (Weight)
+              Holders (Net Buys − SellBacks)
             </h2>
             <span className="text-xs text-slate-400">
-              Circulating weight: {Number(d.circulatingOz || 0).toLocaleString()} oz
+              Circulating policy: {Number(circulatingOz || 0).toLocaleString()} oz
             </span>
           </div>
 
@@ -798,10 +1312,9 @@ export default function BlockSwap() {
             <table className="min-w-full text-left text-sm">
               <thead className="border-b border-slate-800 bg-slate-950/70 text-xs uppercase text-slate-400">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Holder</th>
                   <th className="px-3 py-2 font-medium">Address</th>
                   <th className="px-3 py-2 font-medium text-right">Bricks + Oz</th>
-                  <th className="px-3 py-2 font-medium text-right">% of circ</th>
+                  <th className="px-3 py-2 font-medium text-right">% of policy circ</th>
                   <th className="px-3 py-2 font-medium text-right">Brick Holder</th>
                 </tr>
               </thead>
@@ -809,12 +1322,7 @@ export default function BlockSwap() {
                 {holderRows.length ? (
                   holderRows.map((h, idx) => (
                     <tr key={idx} className="border-b border-slate-800/60 last:border-0">
-                      <td className="px-3 py-2 text-slate-100">
-                        {h.label || shortAddr(h.address)}
-                      </td>
-                      <td className="px-3 py-2 text-xs font-mono text-slate-400">
-                        {shortAddr(h.address)}
-                      </td>
+                      <td className="px-3 py-2 text-xs font-mono text-slate-300">{h.display}</td>
                       <td className="px-3 py-2 text-right font-mono">{h.weightLabel}</td>
                       <td className="px-3 py-2 text-right text-xs text-slate-400">
                         {Number(h.pctWeightCirculating || 0).toFixed(3)}%
@@ -834,8 +1342,12 @@ export default function BlockSwap() {
                   ))
                 ) : (
                   <tr>
-                    <td className="px-3 py-4 text-slate-400" colSpan={5}>
-                      No holders yet.
+                    <td className="px-3 py-4 text-slate-400" colSpan={4}>
+                      {RELAYER_URL
+                        ? feedLoadedOnce
+                          ? "No holders yet."
+                          : "Waiting for holders data…"
+                        : "Relayer not configured. Holders list is unavailable."}
                     </td>
                   </tr>
                 )}
@@ -844,7 +1356,8 @@ export default function BlockSwap() {
           </div>
 
           <p className="mt-3 text-[0.75rem] text-slate-500">
-            Demo mode persists locally in your browser. On-chain will read OZ balances from Base.
+            This list is built from relayer-indexed BlockSwap events. Wallet-to-wallet OZ transfers
+            won’t show here unless you later index ERC20 Transfer events.
           </p>
         </section>
       </main>

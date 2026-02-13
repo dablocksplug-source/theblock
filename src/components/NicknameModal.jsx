@@ -1,5 +1,5 @@
 // src/components/NicknameModal.jsx
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNicknameContext } from "../context/NicknameContext";
 import "./NicknameModal.css";
 
@@ -9,35 +9,44 @@ export default function NicknameModal() {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
 
+  // ✅ reset when opening
+  useEffect(() => {
+    if (modalOpen) {
+      setName("");
+      setError("");
+    }
+  }, [modalOpen]);
+
   if (!modalOpen) return null;
 
   const submit = async () => {
-    console.log("[NicknameModal] Save button clicked with:", name);
     setError("");
 
+    const trimmed = String(name || "").trim();
+    if (trimmed.length < 3) {
+      setError("Name must be at least 3 characters.");
+      return;
+    }
+
     try {
-      if (!name || name.trim().length < 3) {
-        setError("Name must be at least 3 characters.");
-        return;
-      }
-
-      await saveNickname(name.trim());
-      console.log("[NicknameModal] saveNickname resolved");
-
-      // ✅ close on success + clear input
+      await saveNickname(trimmed);
       setName("");
       setModalOpen(false);
     } catch (err) {
       console.error("[NicknameModal] saveNickname failed", err);
-      setError(err.message || "Failed to save nickname");
+      setError(err?.message || "Failed to save nickname");
     }
   };
 
   return (
     <div className="nick-overlay">
       <div className="nick-card">
-        {/* close button */}
-        <button onClick={() => setModalOpen(false)} className="nick-close">
+        <button
+          onClick={() => setModalOpen(false)}
+          className="nick-close"
+          disabled={loading}
+          aria-label="Close"
+        >
           ✖
         </button>
 
@@ -50,8 +59,12 @@ export default function NicknameModal() {
           value={name}
           onChange={(e) => {
             setName(e.target.value);
-            setError("");
+            if (error) setError("");
           }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+          }}
+          disabled={loading}
         />
 
         {error && <div className="nick-error">{error}</div>}

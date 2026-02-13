@@ -1,23 +1,15 @@
 // src/context/NicknameContext.jsx
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useWallet } from "./WalletContext";
-import { setNickname as setNicknameOnChain, getNickname } from "../utils/nicknameAPI";
+import { setNickname as setNicknameDirect, setNicknameRelayed, getNickname } from "../utils/nicknameAPI";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
-/**
- * v2: store nicknames PER WALLET (address => nickname)
- * - Prevents nickname “bleeding” across accounts in the same browser.
- * - Keeps useNickname as a global toggle (one switch for everyone).
- * - Syncs nickname into BlockSwap labels so holders table updates instantly.
- */
 const STORAGE_KEY = "theblock_nickname_settings_v2";
-
 const NicknameContext = createContext(null);
 
 function normalizeAddr(a) {
   return a ? String(a).toLowerCase() : "";
 }
-
 function safeParse(json, fallback) {
   try {
     return JSON.parse(json);
@@ -27,23 +19,17 @@ function safeParse(json, fallback) {
 }
 
 export function NicknameProvider({ children }) {
-  const { walletAddress } = useWallet();
+  const { walletAddress, provider, isConnected } = useWallet();
   const addrKey = useMemo(() => normalizeAddr(walletAddress), [walletAddress]);
 
-  // global toggle
   const [useNickname, setUseNickname] = useState(true);
-
-  // per-wallet storage
-  const [nicknamesByAddr, setNicknamesByAddr] = useState({}); // { [addrLower]: "Name" }
-
-  // current wallet's nickname (derived from nicknamesByAddr + addrKey)
+  const [nicknamesByAddr, setNicknamesByAddr] = useState({});
   const [nickname, setNicknameState] = useState("");
 
-  // modal + async state
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ── load from localStorage once ───────────────────────────
+  // load local
   useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
@@ -51,17 +37,28 @@ export function NicknameProvider({ children }) {
     const parsed = safeParse(raw, null);
     if (!parsed) return;
 
-    if (typeof parsed.useNickname === "boolean") {
-      setUseNickname(parsed.useNickname);
-    }
-
-    if (parsed.nicknames && typeof parsed.nicknames === "object") {
-      setNicknamesByAddr(parsed.nicknames);
-    }
+    if (typeof parsed.useNickname === "boolean") setUseNickname(parsed.useNickname);
+    if (parsed.nicknames && typeof parsed.nicknames === "object") setNicknamesByAddr(parsed.nicknames);
   }, []);
 
-  // ── when wallet changes: set nickname from per-wallet map ──
+  // persist local
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ useNickname, nicknames: nicknamesByAddr })
+      );
+    } catch (err) {
+      console.error("Failed to save nickname settings:", err);
+    }
+  }, [useNickname, nicknamesByAddr]);
+
+  // wallet change: set current nickname from per-wallet map (no bleed)
+  useEffect(() => {
+    // close modal + stop loading on wallet change / disconnect
+    setModalOpen(false);
+    setLoading(false);
+
     if (!addrKey) {
       setNicknameState("");
       return;
@@ -71,25 +68,11 @@ export function NicknameProvider({ children }) {
     if (typeof localName === "string" && localName.trim().length > 0) {
       setNicknameState(localName.trim());
     } else {
-      // IMPORTANT: do not carry nickname between wallets
       setNicknameState("");
     }
   }, [addrKey, nicknamesByAddr]);
 
-  // ── persist to localStorage whenever map / toggle changes ──
-  useEffect(() => {
-    try {
-      const payload = JSON.stringify({
-        useNickname,
-        nicknames: nicknamesByAddr,
-      });
-      window.localStorage.setItem(STORAGE_KEY, payload);
-    } catch (err) {
-      console.error("Failed to save nickname settings:", err);
-    }
-  }, [useNickname, nicknamesByAddr]);
-
-  // ── on wallet change, optionally try to read on-chain nickname ───
+  // on wallet connect/change, try to read chain nickname once
   useEffect(() => {
     if (!walletAddress) return;
 
@@ -99,26 +82,22 @@ export function NicknameProvider({ children }) {
       try {
         const chainName = await getNickname(walletAddress);
         const trimmed = (chainName || "").trim();
+        if (cancelled || trimmed.length === 0) return;
 
-        if (!cancelled && trimmed.length > 0) {
-          const key = normalizeAddr(walletAddress);
+        const key = normalizeAddr(walletAddress);
 
-          setNicknamesByAddr((prev) => {
-            const cur = prev?.[key];
-            if (cur === trimmed) return prev || {};
-            return { ...(prev || {}), [key]: trimmed };
-          });
+        setNicknamesByAddr((prev) => {
+          const cur = prev?.[key];
+          if (cur === trimmed) return prev || {};
+          return { ...(prev || {}), [key]: trimmed };
+        });
 
-          setNicknameState(trimmed);
-          setUseNickname(true);
+        setNicknameState(trimmed);
+        setUseNickname(true);
 
-          // ✅ keep BlockSwap holders label in sync too
-          try {
-            blockswapAdapter.setLabel({ walletAddress, label: trimmed });
-          } catch {
-            // ignore if adapter isn't ready or user isn't on BlockSwap page
-          }
-        }
+        try {
+          blockswapAdapter.setLabel({ walletAddress, label: trimmed });
+        } catch {}
       } catch (err) {
         console.debug("No nickname on chain for this wallet:", err?.message);
       }
@@ -129,73 +108,54 @@ export function NicknameProvider({ children }) {
     };
   }, [walletAddress]);
 
-  // ── optional: react to MetaMask account changes ──
-  useEffect(() => {
-    if (!window?.ethereum?.on) return;
-
-    const handler = () => {
-      setModalOpen(false);
-    };
-
-    window.ethereum.on("accountsChanged", handler);
-    return () => {
-      try {
-        window.ethereum.removeListener("accountsChanged", handler);
-      } catch {
-        /* ignore */
-      }
-    };
-  }, []);
-
-  // ── internal helper to set nickname PER WALLET (and current state) ──
   const setNickname = (val) => {
     const trimmed = (val || "").trim();
-
     setNicknameState(trimmed);
 
     if (walletAddress) {
       const key = normalizeAddr(walletAddress);
       setNicknamesByAddr((prev) => ({ ...(prev || {}), [key]: trimmed }));
-
-      // ✅ also update BlockSwap label right away
       try {
         blockswapAdapter.setLabel({ walletAddress, label: trimmed });
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   };
 
-  // ── what the modal actually calls ─────────────────────────
   const saveNickname = async (name) => {
     const trimmed = (name || "").trim();
 
-    if (!walletAddress) throw new Error("Connect your wallet first.");
+    if (!walletAddress || !isConnected) throw new Error("Connect your wallet first.");
     if (!trimmed) throw new Error("Enter a nickname first.");
     if (trimmed.length < 3) throw new Error("Name too short.");
+    if (trimmed.length > 24) throw new Error("Name too long (max 24).");
 
     setLoading(true);
     try {
-      console.log("[NicknameContext] saving nickname:", trimmed);
+      // ✅ gasless: sign with active connected provider (MetaMask/Coinbase/WC)
+      try {
+        await setNicknameRelayed(trimmed, walletAddress, provider);
+      } catch (e) {
+        const allowDirect = String(import.meta.env.VITE_ALLOW_DIRECT_NICKNAME || "") === "true";
+        if (!allowDirect) {
+          throw new Error(
+            `Gasless nickname failed: ${e?.shortMessage || e?.message || e}\n` +
+              `Fix: ensure relayer exposes POST /relay/nickname and VITE_RELAYER_URL is set.\n` +
+              `Dev escape hatch: set VITE_ALLOW_DIRECT_NICKNAME=true.`
+          );
+        }
+        await setNicknameDirect(trimmed, walletAddress);
+      }
 
-      // 👉 triggers MetaMask (writes on-chain)
-      // (keeping your signature exactly as you wrote it)
-      await setNicknameOnChain(trimmed, walletAddress);
-
-      // update local state PER WALLET
       const key = normalizeAddr(walletAddress);
       setNicknamesByAddr((prev) => ({ ...(prev || {}), [key]: trimmed }));
       setNicknameState(trimmed);
       setUseNickname(true);
 
-      // ✅ THIS is the missing link:
-      // update the BlockSwap "labels" map so holders table shows nickname immediately
       try {
         blockswapAdapter.setLabel({ walletAddress, label: trimmed });
-      } catch (e) {
-        console.debug("BlockSwap label sync skipped:", e?.message);
-      }
+      } catch {}
 
+      setModalOpen(false);
       return true;
     } finally {
       setLoading(false);
@@ -203,10 +163,7 @@ export function NicknameProvider({ children }) {
   };
 
   const askForNickname = () => {
-    if (!walletAddress) {
-      console.warn("No wallet connected, cannot open nickname modal");
-      return;
-    }
+    if (!walletAddress || !isConnected) return;
     setModalOpen(true);
   };
 
@@ -214,7 +171,7 @@ export function NicknameProvider({ children }) {
     nickname,
     useNickname,
 
-    setNickname, // per-wallet
+    setNickname,
     setUseNickname,
 
     modalOpen,
@@ -231,26 +188,16 @@ export function NicknameProvider({ children }) {
 
 export function useNicknameContext() {
   const ctx = useContext(NicknameContext);
-  if (!ctx) {
-    throw new Error("useNicknameContext must be used inside a NicknameProvider");
-  }
+  if (!ctx) throw new Error("useNicknameContext must be used inside a NicknameProvider");
   return ctx;
 }
-
 export function useNickname() {
   return useNicknameContext();
 }
-
 export function getDisplayName({ walletAddress, nickname, useNickname }) {
-  if (useNickname && nickname && nickname.trim().length > 0) {
-    return nickname.trim();
-  }
-
+  if (useNickname && nickname && nickname.trim().length > 0) return nickname.trim();
   if (!walletAddress) return "Unknown";
-
   const addr = String(walletAddress);
-  if (addr.length <= 10) return addr;
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  return addr.length <= 10 ? addr : `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
-
 export default NicknameProvider;

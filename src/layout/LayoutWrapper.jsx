@@ -1,6 +1,6 @@
 // src/layout/LayoutWrapper.jsx
 import React from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, Outlet } from "react-router-dom";
 
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
@@ -9,9 +9,7 @@ import WalletPanel from "../components/WalletPanel";
 import NicknameModal from "../components/NicknameModal";
 
 export default function LayoutWrapper({ children }) {
-  const { walletAddress, connectWallet, disconnectWallet, isConnected } =
-    useWallet();
-
+  const { walletAddress, connectWallet, disconnectWallet, isConnected } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
   const location = useLocation();
 
@@ -26,6 +24,7 @@ export default function LayoutWrapper({ children }) {
   ];
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
+
   const shortAddress =
     walletAddress && walletAddress.length > 10
       ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
@@ -43,7 +42,6 @@ export default function LayoutWrapper({ children }) {
           The Block
         </Link>
 
-        {/* (Removed BDAG price entirely) */}
         <div className="text-xs text-slate-500 hidden sm:block">
           Building slow. Shipping steady.
         </div>
@@ -55,6 +53,7 @@ export default function LayoutWrapper({ children }) {
               ? "border-rose-400/30 text-rose-300"
               : "border-cyan-400/30 text-cyan-300"
           }`}
+          type="button"
         >
           {walletButtonLabel}
         </button>
@@ -85,7 +84,10 @@ export default function LayoutWrapper({ children }) {
       </nav>
 
       {/* ====== MAIN CONTENT ====== */}
-      <main className="px-6 py-10">{children}</main>
+      <main className="px-6 py-10">
+        {/* ✅ If children were passed manually, render them. Otherwise render router content. */}
+        {children ?? <Outlet />}
+      </main>
 
       <footer className="border-t border-slate-800 py-4 text-center text-xs text-slate-600">
         © {new Date().getFullYear()} The Block.

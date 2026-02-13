@@ -1,61 +1,198 @@
 // src/components/BlockSwapAdminPanel.jsx
-import React, { useMemo, useEffect, useState } from "react";
+import React, { useMemo, useEffect, useState, useRef, useCallback } from "react";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
-export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
-  const [sell, setSell] = useState(String(d.sellPricePerBrick ?? 0));
-  const [floor, setFloor] = useState(String(d.buybackFloorPerBrick ?? 0));
-  const [fund, setFund] = useState("");
-  const [phase, setPhase] = useState(String(d.phase ?? 1));
-  const [rewardPool, setRewardPool] = useState("");
+const short = (a) =>
+  a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
+
+const isAddrLike = (v) => /^0x[a-fA-F0-9]{40}$/.test(String(v || "").trim());
+
+function isNumberish(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  return Number.isFinite(Number(s));
+}
+
+export default function BlockSwapAdminPanel({
+  walletAddress,
+  adminWallet,
+  onRefresh,
+  chainId, // current wallet chain id (wagmi)
+  targetChainId, // expected chain id (from config passed by page)
+  ensureChain, // WalletContext.ensureChain
+  stableSymbol = "USDC",
+}) {
+  const mountedRef = useRef(true);
 
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const [snap, setSnap] = useState(null);
+  const [sell, setSell] = useState("");
+  const [floor, setFloor] = useState("");
+
+  const [treasuryAddr, setTreasuryAddr] = useState("");
+  const [relayerAddr, setRelayerAddr] = useState("");
+
+  // prevent overlap + spam
+  const refreshInFlightRef = useRef(false);
+  const lastRefreshAtRef = useRef(0);
+  const lastSnapSigRef = useRef("");
 
   useEffect(() => {
-    setSell(String(d.sellPricePerBrick ?? 0));
-    setFloor(String(d.buybackFloorPerBrick ?? 0));
-    setPhase(String(d.phase ?? 1));
-  }, [d.sellPricePerBrick, d.buybackFloorPerBrick, d.phase]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const isAdmin = useMemo(() => {
-    if (!walletAddress) return false;
-    return (
-      String(walletAddress).toLowerCase() ===
-      String(d.ADMIN_WALLET).toLowerCase()
-    );
-  }, [walletAddress, d.ADMIN_WALLET]);
+    if (!walletAddress || !adminWallet) return false;
+    return String(walletAddress).toLowerCase() === String(adminWallet).toLowerCase();
+  }, [walletAddress, adminWallet]);
+
+  const target = Number(targetChainId || 0);
+  const current = Number(chainId || 0);
+  const chainReady = current > 0;
+
+  const isConnected = !!walletAddress;
+  const wrongChain = isConnected && target > 0 && chainReady && current !== target;
+
+  const STABLE = String(stableSymbol || "USDC");
+
+  function snapSignature(s) {
+    try {
+      const sellPerBrick = String(s?.fmt?.sellPerBrick ?? "");
+      const floorPerBrick = String(s?.fmt?.floorPerBrick ?? "");
+      const vault = String(s?.fmt?.vault ?? "");
+      const liability = String(s?.fmt?.liability ?? "");
+      const buyPaused = String(!!s?.buyPaused);
+      const chain = String(s?.chainId ?? "");
+      return [chain, sellPerBrick, floorPerBrick, vault, liability, buyPaused].join("|");
+    } catch {
+      return "";
+    }
+  }
+
+  const refresh = useCallback(
+    async ({ force = false, notifyParent = true } = {}) => {
+      if (!mountedRef.current) return;
+      if (!isAdmin) return;
+
+      if (refreshInFlightRef.current) return;
+
+      const now = Date.now();
+      if (!force && now - lastRefreshAtRef.current < 2500) return;
+
+      refreshInFlightRef.current = true;
+      lastRefreshAtRef.current = now;
+
+      setErr("");
+
+      try {
+        const s = await blockswapAdapter.getSwapSnapshot();
+        if (!mountedRef.current) return;
+
+        setSnap(s || null);
+
+        // Use formatted strings (brick prices) from snapshot
+        setSell(String(s?.fmt?.sellPerBrick ?? ""));
+        setFloor(String(s?.fmt?.floorPerBrick ?? ""));
+
+        if (notifyParent && typeof onRefresh === "function") {
+          const sig = snapSignature(s);
+          if (force || sig !== lastSnapSigRef.current) {
+            lastSnapSigRef.current = sig;
+            onRefresh(s || null);
+          }
+        }
+      } catch (e) {
+        if (!mountedRef.current) return;
+        setErr(e?.shortMessage || e?.message || "Failed to refresh admin snapshot.");
+      } finally {
+        refreshInFlightRef.current = false;
+      }
+    },
+    [isAdmin, onRefresh]
+  );
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    refresh({ force: true, notifyParent: true }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   if (!isAdmin) return null;
 
-  const act = (fn) => {
+  async function act(label, fn) {
     try {
       setErr("");
       setMsg("");
-      const snap = fn();
-      onUpdated?.(snap);
-      return snap;
+      setBusy(true);
+
+      if (wrongChain) {
+        if (ensureChain && target) {
+          await ensureChain(target);
+        } else {
+          throw new Error(
+            `Wrong network. Switch wallet to chain ${target}. (Base Sepolia is 84532)`
+          );
+        }
+      }
+
+      const res = await fn();
+      if (!mountedRef.current) return res;
+
+      setMsg(`${label} sent ✅`);
+      await refresh({ force: true, notifyParent: true });
+
+      return res;
     } catch (e) {
-      setErr(e?.message || "Admin action failed.");
+      if (!mountedRef.current) return null;
+      setErr(e?.shortMessage || e?.message || "Admin action failed.");
       return null;
+    } finally {
+      if (mountedRef.current) setBusy(false);
     }
-  };
+  }
 
-  const STABLE = d.STABLE_SYMBOL || "USDC";
-
-  const short = (a) =>
-    a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
+  const canTogglePause = !busy;
+  const canUpdatePrices = !busy && isNumberish(sell) && isNumberish(floor);
+  const canUpdateTreasury = !busy && isAddrLike(treasuryAddr);
+  const canUpdateRelayer = !busy && isAddrLike(relayerAddr);
 
   return (
     <div className="mb-6 rounded-2xl border border-amber-400/20 bg-amber-500/5 p-5">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="text-sm font-semibold uppercase tracking-wide text-amber-200">
-          Admin Panel
+          Admin Panel (On-chain)
         </div>
-        <div className="text-xs text-amber-200/80">
-          Admin: {short(d.ADMIN_WALLET)}
-        </div>
+        <div className="text-xs text-amber-200/80">Admin: {short(adminWallet)}</div>
       </div>
+
+      {wrongChain ? (
+        <div className="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+          Wrong network (current: {current || "?"}, target: {target}).
+          {ensureChain ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                try {
+                  setErr("");
+                  await ensureChain(target);
+                } catch (e) {
+                  setErr(e?.message || "Failed to switch network.");
+                }
+              }}
+              className="ml-2 rounded-md bg-rose-500 px-2 py-1 text-[10px] font-semibold text-slate-950 hover:bg-rose-400 disabled:opacity-60"
+            >
+              Switch Network
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {err ? (
         <div className="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
@@ -69,147 +206,90 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
         </div>
       ) : null}
 
+      {busy ? (
+        <div className="mb-3 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-300">
+          Working… (sending tx)
+        </div>
+      ) : null}
+
+      {/* On-chain status */}
+      <div className="mb-4 grid gap-2 rounded-xl border border-slate-800 bg-slate-950/50 p-4 lg:grid-cols-3">
+        <div className="text-xs text-slate-400">
+          Vault ({STABLE})
+          <div className="mt-1 font-mono text-slate-100">{snap?.fmt?.vault ?? "—"}</div>
+        </div>
+        <div className="text-xs text-slate-400">
+          Floor Liability ({STABLE})
+          <div className="mt-1 font-mono text-slate-100">{snap?.fmt?.liability ?? "—"}</div>
+        </div>
+        <div className="text-xs text-slate-400">
+          Solvent?
+          <div className={"mt-1 font-mono " + (snap?.isSolvent ? "text-emerald-300" : "text-rose-300")}>
+            {snap?.isSolvent ? "true" : "false"}
+          </div>
+        </div>
+
+        <div className="text-xs text-slate-400">
+          Coverage (vault/liability)
+          <div className="mt-1 font-mono text-slate-100">{snap?.fmt?.coverage ?? "—"}</div>
+        </div>
+        <div className="text-xs text-slate-400">
+          Swap OZ Inventory
+          <div className="mt-1 font-mono text-slate-100">{snap?.fmt?.swapOz ?? "—"}</div>
+        </div>
+        <div className="text-xs text-slate-400">
+          Buys
+          <div className={"mt-1 font-mono " + (snap?.buyPaused ? "text-rose-300" : "text-emerald-300")}>
+            {snap?.buyPaused ? "PAUSED" : "LIVE"}
+          </div>
+        </div>
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Marketing + Pause Buys */}
+        {/* Pause */}
         <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
           <div className="text-xs text-slate-400">Controls</div>
 
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
+              disabled={!canTogglePause}
               onClick={() =>
-                act(() =>
-                  blockswapAdapter.adminSetEarlyBirdBadge({
-                    walletAddress,
-                    enabled: !d.earlyBirdBadge,
-                  })
-                )
-              }
-              className={
-                "rounded-lg px-3 py-2 text-xs font-semibold " +
-                (d.earlyBirdBadge
-                  ? "bg-sky-500 text-slate-950 hover:bg-sky-400"
-                  : "border border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-500")
-              }
-            >
-              Early Bird Badge: {d.earlyBirdBadge ? "ON" : "OFF"}
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                act(() =>
+                act("Set pause", () =>
                   blockswapAdapter.adminSetBuyPaused({
                     walletAddress,
-                    paused: !d.buyPaused,
+                    paused: !snap?.buyPaused,
                   })
                 )
               }
               className={
-                "rounded-lg px-3 py-2 text-xs font-semibold " +
-                (d.buyPaused
-                  ? "bg-rose-500 text-slate-950 hover:bg-rose-400"
-                  : "bg-emerald-500 text-slate-950 hover:bg-emerald-400")
+                "rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-60 " +
+                (snap?.buyPaused
+                  ? "bg-emerald-500 text-slate-950 hover:bg-emerald-400"
+                  : "bg-rose-500 text-slate-950 hover:bg-rose-400")
               }
             >
-              Buys: {d.buyPaused ? "PAUSED" : "LIVE"}
+              {snap?.buyPaused ? "Unpause Buys" : "Pause Buys"}
             </button>
 
             <button
               type="button"
-              onClick={() => act(() => blockswapAdapter.adminReset({ walletAddress }))}
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500"
+              disabled={busy}
+              onClick={() => refresh({ force: true, notifyParent: true })}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500 disabled:opacity-60"
             >
-              Reset (local)
+              Refresh
             </button>
           </div>
 
           <div className="mt-2 text-[0.75rem] text-slate-400">
-            Early Bird is marketing only. Buys are controlled by the Pause button.
+            Toggles <span className="font-mono">buyPaused</span> on-chain. SellBack remains available.
           </div>
-        </div>
-
-        {/* Fund / Move BuybackVault */}
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-          <div className="text-xs text-slate-400">BuybackVault Funding</div>
-
-          <div className="mt-2 flex gap-2">
-            <input
-              value={fund}
-              onChange={(e) => setFund(e.target.value)}
-              placeholder={`Amount in ${STABLE}`}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
-            />
-
-            <button
-              type="button"
-              onClick={() => {
-                const snap = act(() =>
-                  blockswapAdapter.adminFundTreasury({
-                    walletAddress,
-                    amountStable: fund,
-                  })
-                );
-                if (snap) setFund("");
-              }}
-              className="shrink-0 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300"
-            >
-              Deposit
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const snap = act(() =>
-                  blockswapAdapter.adminMoveToBuybackVault({
-                    walletAddress,
-                    amountStable: fund,
-                  })
-                );
-                if (snap) setFund("");
-              }}
-              className="shrink-0 rounded-lg border border-amber-400/40 bg-slate-900 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-slate-800"
-            >
-              Move from TheBlock
-            </button>
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-2">
-            {[500, 5000, 50000].map((x) => (
-              <button
-                key={x}
-                type="button"
-                onClick={() => setFund(String(x))}
-                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:border-amber-400/60"
-              >
-                {x.toLocaleString()}
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-3 grid gap-1 text-[0.75rem] text-slate-400">
-            <div>
-              BuybackVault:{" "}
-              <span className="font-mono text-emerald-200">
-                {Number(d.buybackVault || 0).toLocaleString()} {STABLE}
-              </span>
-            </div>
-            <div>
-              TheBlock:{" "}
-              <span className="font-mono text-sky-300">
-                {Number(d.theBlockTreasury || 0).toLocaleString()} {STABLE}
-              </span>
-            </div>
-          </div>
-
-          <p className="mt-2 text-[0.7rem] text-slate-500">
-            Deposit = add funds to BuybackVault. Move = transfer from TheBlock → BuybackVault.
-          </p>
         </div>
 
         {/* Prices */}
         <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-          <div className="text-xs text-slate-400">Prices (can only go UP)</div>
+          <div className="text-xs text-slate-400">Prices (on-chain, can only go UP)</div>
 
           <div className="mt-2 grid gap-2 sm:grid-cols-2">
             <label className="text-xs text-slate-400">
@@ -233,154 +313,86 @@ export default function BlockSwapAdminPanel({ walletAddress, d, onUpdated }) {
 
           <button
             type="button"
+            disabled={!canUpdatePrices}
             onClick={() =>
-              act(() =>
+              act("Update prices", () =>
                 blockswapAdapter.adminSetPrices({
                   walletAddress,
-                  sellPricePerBrick: sell,
-                  buybackFloorPerBrick: floor,
+                  sellPricePerBrick: String(sell).trim(),
+                  buybackFloorPerBrick: String(floor).trim(),
                 })
               )
             }
-            className="mt-3 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300"
+            className="mt-3 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300 disabled:opacity-60"
+            title={!canUpdatePrices ? "Enter valid numeric values for sell and floor." : ""}
           >
             Update Prices
           </button>
 
           <div className="mt-2 text-[0.75rem] text-slate-400">
-            Rule: sell price and buyback floor can only increase.
+            Rule: sell and floor can only increase; sell must be ≥ floor.
           </div>
         </div>
 
-        {/* Phase */}
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-          <div className="text-xs text-slate-400">Phase</div>
-
-          <div className="mt-2 flex gap-2">
-            <select
-              value={phase}
-              onChange={(e) => setPhase(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
-            >
-              <option value="1">Phase 1 (30%)</option>
-              <option value="2">Phase 2 (35%)</option>
-              <option value="3">Phase 3 (40%)</option>
-            </select>
-
-            <button
-              type="button"
-              onClick={() =>
-                act(() => blockswapAdapter.adminAdvancePhase({ walletAddress, phase }))
-              }
-              className="shrink-0 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-300"
-            >
-              Set
-            </button>
-          </div>
-
-          <div className="mt-2 text-[0.75rem] text-slate-400">
-            Current phase: <span className="text-slate-100">{d.phase}</span>
-          </div>
-        </div>
-
-        {/* Rewards */}
+        {/* Advanced */}
         <div className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-          <div className="text-xs text-slate-400">Rewards (claim-only, 180 days)</div>
+          <div className="text-xs text-slate-400">Advanced (optional)</div>
 
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <input
-              value={rewardPool}
-              onChange={(e) => setRewardPool(e.target.value)}
-              placeholder={`Reward pool in ${STABLE} (ex: 100)`}
-              className="w-64 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
-            />
-
-            <button
-              type="button"
-              onClick={() => {
-                const snap = act(() =>
-                  blockswapAdapter.adminCreateRewardRound({
-                    walletAddress,
-                    poolStable: rewardPool,
-                  })
-                );
-                if (snap) setRewardPool("");
-              }}
-              className="rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-400"
-            >
-              Create Reward Round
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                try {
-                  setErr("");
-                  setMsg("");
-                  const json = blockswapAdapter.adminExportStateJSON({ walletAddress });
-
-                  const tryClipboard = navigator.clipboard?.writeText
-                    ? navigator.clipboard.writeText(json)
-                    : Promise.reject(new Error("Clipboard not available"));
-
-                  tryClipboard
-                    .then(() => setMsg("Snapshot copied to clipboard ✅"))
-                    .catch(() => {
-                      window.prompt("Copy Snapshot JSON:", json);
-                      setMsg("Snapshot opened for manual copy ✅");
-                    });
-                } catch (e) {
-                  setErr(e?.message || "Export failed.");
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <label className="text-xs text-slate-400">
+              Set Treasury Address
+              <input
+                value={treasuryAddr}
+                onChange={(e) => setTreasuryAddr(e.target.value)}
+                placeholder="0x..."
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
+              />
+              <button
+                type="button"
+                disabled={!canUpdateTreasury}
+                onClick={() =>
+                  act("Set treasury", () =>
+                    blockswapAdapter.adminSetTreasury({
+                      walletAddress,
+                      treasury: String(treasuryAddr).trim(),
+                    })
+                  )
                 }
-              }}
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500"
-            >
-              Copy Snapshot JSON
-            </button>
+                className="mt-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500 disabled:opacity-60"
+              >
+                Update Treasury
+              </button>
+            </label>
+
+            <label className="text-xs text-slate-400">
+              Set Relayer Address
+              <input
+                value={relayerAddr}
+                onChange={(e) => setRelayerAddr(e.target.value)}
+                placeholder="0x..."
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-amber-400"
+              />
+              <button
+                type="button"
+                disabled={!canUpdateRelayer}
+                onClick={() =>
+                  act("Set relayer", () =>
+                    blockswapAdapter.adminSetRelayer({
+                      walletAddress,
+                      relayer: String(relayerAddr).trim(),
+                    })
+                  )
+                }
+                className="mt-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-500 disabled:opacity-60"
+              >
+                Update Relayer
+              </button>
+            </label>
           </div>
 
           <div className="mt-2 text-[0.75rem] text-slate-500">
-            Contract version will be Merkle claim. This locks in the same round fields now.
+            Only use these if you intend to rotate treasury/relayer on-chain.
           </div>
-
-          {Array.isArray(d.rewardRounds) && d.rewardRounds.length ? (
-            <div className="mt-3 overflow-x-auto">
-              <table className="min-w-full text-left text-xs">
-                <thead className="border-b border-slate-800 text-slate-400">
-                  <tr>
-                    <th className="py-2 pr-3">Round</th>
-                    <th className="py-2 pr-3 text-right">Pool</th>
-                    <th className="py-2 pr-3 text-right">Per Oz</th>
-                    <th className="py-2 pr-3 text-right">Eligible Oz</th>
-                    <th className="py-2 pr-3">Claim End</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.rewardRounds.slice(0, 5).map((r) => (
-                    <tr key={r.id} className="border-b border-slate-800/60">
-                      <td className="py-2 pr-3 font-mono text-slate-200">#{r.id}</td>
-                      <td className="py-2 pr-3 text-right font-mono text-slate-200">
-                        {Number(r.totalPoolStable || 0).toFixed(2)} {STABLE}
-                      </td>
-                      <td className="py-2 pr-3 text-right font-mono text-sky-300">
-                        {Number(r.rewardPerOz || 0).toFixed(6)}
-                      </td>
-                      <td className="py-2 pr-3 text-right font-mono text-slate-200">
-                        {Number(r.snapshotTotalEligibleOz || 0).toLocaleString()}
-                      </td>
-                      <td className="py-2 pr-3 text-slate-400">
-                        {new Date(Number(r.claimEndMs || 0)).toLocaleDateString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="mt-3 text-[0.75rem] text-slate-500">
-              No reward rounds created yet.
-            </div>
-          )}
         </div>
       </div>
     </div>

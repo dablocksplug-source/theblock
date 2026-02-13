@@ -1,39 +1,61 @@
 // src/config/blockswap.config.js
+// Vite ONLY exposes env vars prefixed with VITE_
+// You MUST restart `npm run dev` after changing .env.local.
+
+const ENV = import.meta.env || {};
+
+// Put this in UI ROOT: theblock-ui/.env.local
+// VITE_BASE_SEPOLIA_RPC=https://base-sepolia.g.alchemy.com/v2/KEY
+const RPC_FROM_ENV = ENV.VITE_BASE_SEPOLIA_RPC || ENV.VITE_RPC_URL || "";
+
+function mustRpc() {
+  if (!RPC_FROM_ENV) {
+    console.warn(
+      "[BlockSwap] Missing RPC URL. Set VITE_BASE_SEPOLIA_RPC in theblock-ui/.env.local and restart `npm run dev`."
+    );
+  }
+  return RPC_FROM_ENV;
+}
+
 export const BLOCKSWAP_CONFIG = {
   STORAGE_KEY: "theblock:blockswap:v1",
 
-  // ===== settlement =====
   STABLE_SYMBOL: "USDC",
+  STABLE_DECIMALS: 6,
+  OZ_DECIMALS: 18,
 
-  // ===== supply model =====
-  TOTAL_BRICKS: 2000, // 1 ton
+  TOTAL_BRICKS: 2000,
   OUNCES_PER_BRICK: 36,
 
-  // locked forever
   BLOCK_LOCKED_BRICKS: 500,
-
-  // offering cap
   BRICKS_AVAILABLE_FOR_SALE: 1500,
 
-  // starting prices
   SELL_PRICE_PER_BRICK: 1000,
   BUYBACK_FLOOR_PER_BRICK: 500,
 
-  // treasury starts at 0
   STARTING_TREASURY: 0,
 
-  // phase-up rule (policy)
   STARTING_PHASE: 1,
-  BRICK_POOL_BY_PHASE: {
-    1: 0.30,
-    2: 0.35,
-    3: 0.40,
-  },
+  BRICK_POOL_BY_PHASE: { 1: 0.30, 2: 0.35, 3: 0.40 },
 
-  // admin
   ADMIN_WALLET: "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
 
-  // ✅ marketing + control defaults
-  EARLY_BIRD_BADGE_DEFAULT: true, // marketing only
-  BUY_PAUSED_DEFAULT: false,      // ONLY buy gate
+  EARLY_BIRD_BADGE_DEFAULT: true,
+  BUY_PAUSED_DEFAULT: false,
+
+  // ===========================
+  // Chain
+  // ===========================
+  CHAIN: "baseSepolia",
+  CHAIN_ID: 84532,
+
+  RPC_URL: mustRpc(),
+
+  // ✅ Addresses are FALLBACK ONLY.
+  // The adapter will prefer /public/deployments.baseSepolia.json.
+  // If that file is stale, YOU WILL hit old contracts + wrong ABI and get “unknown selector” errors.
+  USDC_ADDRESS: ENV.VITE_USDC_ADDRESS || "0x0000000000000000000000000000000000000000",
+  OZ_ADDRESS: ENV.VITE_OZ_ADDRESS || "0x0000000000000000000000000000000000000000",
+  BLOCKSWAP_ADDRESS: ENV.VITE_BLOCKSWAP_ADDRESS || "0x0000000000000000000000000000000000000000",
+  REWARDS_ADDRESS: ENV.VITE_REWARDS_ADDRESS || "0x0000000000000000000000000000000000000000",
 };
