@@ -14,7 +14,6 @@ const ENV = process.env;
 // --------------------
 // env
 // --------------------
-// ✅ Fly expects internal_port=8787. If PORT is not injected, default to 8787 (NOT 3000).
 const PORT = Number(ENV.PORT || 8787);
 const CHAIN_ID = Number(ENV.CHAIN_ID || 84532);
 
@@ -39,17 +38,17 @@ const SYNC_LOOKBACK_BLOCKS = Number(ENV.SYNC_LOOKBACK_BLOCKS || 4000);
 const FEED_LIMIT_DEFAULT = Number(ENV.FEED_LIMIT_DEFAULT || 15);
 const HOLDERS_LIMIT_DEFAULT = Number(ENV.HOLDERS_LIMIT_DEFAULT || 250);
 
-// ✅ provider-safe getLogs chunk
+// provider-safe getLogs chunk
 const LOGS_CHUNK_BLOCKS = BigInt(Number(ENV.LOGS_CHUNK_BLOCKS || 10));
 
-// ✅ request timeout knobs (ms)
+// request timeout knobs (ms)
 const SUPABASE_REQ_TIMEOUT_MS = Number(ENV.SUPABASE_REQ_TIMEOUT_MS || 7000);
 
-// ✅ sync-on-relay knobs (improves holders freshness)
+// sync-on-relay knobs (improves holders freshness)
 const SYNC_ON_RELAY = String(ENV.SYNC_ON_RELAY || "1") === "1";
 const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 
-// ✅ PATCH: optional admin key for /admin/sync-now
+// optional admin key for /admin/sync-now
 const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
 
 if (!RPC_URL) throw new Error("Missing RPC_URL");
@@ -185,11 +184,9 @@ const EVT_SOLD = parseAbiItem("event SoldBack(address indexed seller, uint256 oz
 // app
 // --------------------
 const app = express();
-
-// ✅ PATCH: trust proxy for Fly/Vercel/etc so x-forwarded-for works
 app.set("trust proxy", 1);
 
-// ✅ Safe JSON (stringify bigint)
+// Safe JSON (stringify bigint)
 function sendJson(res: any, obj: any, status = 200) {
   return res
     .status(status)
@@ -198,7 +195,7 @@ function sendJson(res: any, obj: any, status = 200) {
 }
 
 // --------------------
-// ✅ CORS
+// CORS
 // --------------------
 const allowlist = new Set<string>([
   "http://localhost:5173",
@@ -211,8 +208,6 @@ const allowlist = new Set<string>([
 
 if (UI_ORIGIN) allowlist.add(UI_ORIGIN);
 
-// ✅ PATCH: allow common Vercel preview domains for your project
-// Example: https://theblock-xxxxxx.vercel.app
 const vercelPreviewRegexes: RegExp[] = [
   /^https:\/\/theblock(-[a-z0-9-]+)?\.vercel\.app$/i,
   /^https:\/\/theblock-ui(-[a-z0-9-]+)?\.vercel\.app$/i,
@@ -235,7 +230,6 @@ app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "256kb" }));
 
-// ✅ PATCH: CORS error handler (otherwise it can look like a random failure)
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (!err) return next();
   const msg = String(err?.message || "");
@@ -338,18 +332,15 @@ function lower(a: string) {
   return String(a || "").toLowerCase();
 }
 
-// ✅ Accept lots of wallet varieties (0/1, 27/28, chain-adjusted, etc)
+// Accept lots of wallet varieties (0/1, 27/28, etc)
 function normalizeV(v: number): number {
   if (!Number.isFinite(v)) return v;
   if (v === 0 || v === 1) return v + 27;
   if (v === 27 || v === 28) return v;
-  if (v > 28) return v % 2 === 0 ? 28 : 27; // parity fallback
+  if (v > 28) return v % 2 === 0 ? 28 : 27;
   return v;
 }
 
-/**
- * ✅ prevents scientific notation breaking storage and BigInt parsing
- */
 function toIntStringSafe(v: any): string {
   if (v == null) return "0";
   if (typeof v === "bigint") return v.toString();
@@ -374,10 +365,6 @@ function toIntStringSafe(v: any): string {
   return "0";
 }
 
-/**
- * ✅ Decode EIP-2098 64-byte signatures:
- * sig = r (32) + vs (32)
- */
 function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
   const hex = String(sig64 || "");
   if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature");
@@ -394,10 +381,6 @@ function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${st
   return { v, r, s };
 }
 
-/**
- * ✅ Decode standard 65-byte signatures manually
- * sig = r (32) + s (32) + v (1)
- */
 function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
   const hex = String(sig65 || "");
   if (!/^0x[0-9a-fA-F]{130}$/.test(hex)) throw new Error("Invalid 65-byte signature");
@@ -409,11 +392,6 @@ function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
-/**
- * ✅ Decode 66-byte signatures (rare, but seen in some mobile flows):
- * sig = r (32) + s (32) + v (2 bytes)
- * We'll take the LAST byte as v (so 0x001b -> 0x1b).
- */
 function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
   const hex = String(sig66 || "");
   if (!/^0x[0-9a-fA-F]{132}$/.test(hex)) throw new Error("Invalid 66-byte signature");
@@ -425,14 +403,12 @@ function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
-// parse v/r/s either from v+r+s OR from signature (64B, 65B, 66B)
 function parseSig(body: any, prefix?: "buy" | "permit") {
   const vKey = prefix ? `${prefix}V` : "v";
   const rKey = prefix ? `${prefix}R` : "r";
   const sKey = prefix ? `${prefix}S` : "s";
   const sigKey = prefix ? `${prefix}Signature` : "signature";
 
-  // v/r/s path
   if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
     const vNumRaw = Number(body[vKey]);
     if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
@@ -446,23 +422,16 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
     return { v: vNum, r, s };
   }
 
-  // signature path
   if (body?.[sigKey]) {
     const sigHex = String(body[sigKey] || "").trim();
 
-    // ✅ if wallet popup was blocked, you often get "0x" or empty here
     if (!sigHex || sigHex === "0x") {
       throw new Error(`${sigKey}: Signature missing/blocked (empty). Try again and approve the signature prompt.`);
     }
     if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
 
-    // 64-byte EIP-2098
     if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
-
-    // 65-byte standard
     if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
-
-    // 66-byte (rare)
     if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
 
     throw new Error(
@@ -484,7 +453,6 @@ async function requireRelayerMatches() {
   }
 }
 
-// ✅ Promise/thenable timeout helper
 async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promise<T> {
   let t: any;
   const timeout = new Promise<never>((_, rej) => {
@@ -501,8 +469,11 @@ async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promi
 // --------------------
 // Supabase upserts
 // --------------------
-async function supaInsertEvent(row: any) {
-  if (!supabase) return;
+
+// ✅ CHANGE: return whether the event was truly inserted.
+// If it's a duplicate, return false so we DO NOT apply holder deltas again.
+async function supaInsertEvent(row: any): Promise<boolean> {
+  if (!supabase) return false;
   try {
     const fixed = {
       ...row,
@@ -517,11 +488,17 @@ async function supaInsertEvent(row: any) {
     );
 
     if (error) {
-      const msg = String((error as any).message || "");
-      if (!msg.toLowerCase().includes("duplicate")) console.warn("[supa] insert event error:", (error as any).message);
+      const msg = String((error as any).message || "").toLowerCase();
+      // ✅ duplicates are expected when we lookback; treat as NOT inserted
+      if (msg.includes("duplicate") || msg.includes("unique") || msg.includes("conflict")) return false;
+      console.warn("[supa] insert event error:", (error as any).message);
+      return false;
     }
+
+    return true;
   } catch (e: any) {
     console.warn("[supa] insert event exception:", e?.message || e);
+    return false;
   }
 }
 
@@ -588,6 +565,30 @@ let __syncLastRunAt: string | null = null;
 let __syncLastOkAt: string | null = null;
 let __syncLastError: string | null = null;
 
+// ✅ NEW: initialize cursor from Supabase so redeploys don't re-walk forever
+async function initSyncCursorFromDb() {
+  if (!supabase) return;
+
+  try {
+    const { data, error } = await supabase
+      .from("blockswap_events")
+      .select("block_number")
+      .eq("chain_id", CHAIN_ID)
+      .eq("contract", lower(BLOCKSWAP_ADDRESS))
+      .order("block_number", { ascending: false })
+      .limit(1);
+
+    if (!error && data?.length) {
+      __lastSyncedToBlock = BigInt(Number((data as any)[0]?.block_number || 0));
+      console.log(`[sync] cursor initialized to block ${__lastSyncedToBlock.toString()} from DB`);
+    } else {
+      console.log("[sync] cursor init: no prior events in DB (starting fresh)");
+    }
+  } catch (e: any) {
+    console.warn("[sync] cursor init failed:", e?.message || e);
+  }
+}
+
 async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
   if (!supabase) return { ok: false, skipped: true, reason: "supabase_not_configured" };
   if (__syncInFlight) return { ok: false, skipped: true, reason: "sync_already_running" };
@@ -625,7 +626,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
         const ozWei = BigInt((l as any).args?.ozWei ?? 0n);
         const usdcTotal = BigInt((l as any).args?.usdcTotal ?? 0n);
 
-        await supaInsertEvent({
+        const didInsert = await supaInsertEvent({
           chain_id: CHAIN_ID,
           contract: lower(BLOCKSWAP_ADDRESS),
           event_type: "BUY",
@@ -637,10 +638,12 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
           log_index: Number((l as any).logIndex ?? 0),
           created_at: new Date().toISOString(),
         });
-        inserted += 1;
 
-        await supaUpsertHolderDelta({ wallet: buyer, ozWeiDelta: ozWei });
-        updatedHolders += 1;
+        if (didInsert) {
+          inserted += 1;
+          await supaUpsertHolderDelta({ wallet: buyer, ozWeiDelta: ozWei });
+          updatedHolders += 1;
+        }
       }
 
       for (const l of sold || []) {
@@ -648,7 +651,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
         const ozWei = BigInt((l as any).args?.ozWei ?? 0n);
         const usdcPaid = BigInt((l as any).args?.usdcPaid ?? 0n);
 
-        await supaInsertEvent({
+        const didInsert = await supaInsertEvent({
           chain_id: CHAIN_ID,
           contract: lower(BLOCKSWAP_ADDRESS),
           event_type: "SELLBACK",
@@ -660,10 +663,12 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
           log_index: Number((l as any).logIndex ?? 0),
           created_at: new Date().toISOString(),
         });
-        inserted += 1;
 
-        await supaUpsertHolderDelta({ wallet: seller, ozWeiDelta: -ozWei });
-        updatedHolders += 1;
+        if (didInsert) {
+          inserted += 1;
+          await supaUpsertHolderDelta({ wallet: seller, ozWeiDelta: -ozWei });
+          updatedHolders += 1;
+        }
       }
 
       cursor = end + 1n;
@@ -807,7 +812,7 @@ app.get("/feed/holders", async (req, res) => {
   }
 });
 
-// ✅ Manual sync trigger (prevents 404) + ✅ PATCH: optional admin key protection
+// Manual sync trigger
 app.post("/admin/sync-now", async (req, res) => {
   try {
     if (!ENABLE_CHAIN_SYNC) return sendJson(res, { ok: false, error: "sync_disabled" }, 400);
@@ -882,7 +887,8 @@ app.post("/relay/buy", async (req, res) => {
       args: [user, ozWei, deadline, v, r, s],
     });
 
-    if (hasSupabase()) supaUpsertHolderDelta({ wallet: user, ozWeiDelta: ozWei }).catch(() => {});
+    // ✅ IMPORTANT: do NOT directly mutate holders here.
+    // Sync will pick up the event and apply delta ONCE (and only if inserted).
     if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
       setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
@@ -929,7 +935,7 @@ app.post("/relay/buy-permit", async (req, res) => {
       ],
     });
 
-    if (hasSupabase()) supaUpsertHolderDelta({ wallet: user, ozWeiDelta: ozWei }).catch(() => {});
+    // ✅ same: rely on sync to update holders safely
     if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
       setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
@@ -957,9 +963,11 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Admin key: ${ADMIN_KEY ? "ON" : "OFF"}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
-    console.log(`[sync] ENABLED every ${SYNC_EVERY_MS}ms, lookback=${SYNC_LOOKBACK_BLOCKS} blocks`);
-    setTimeout(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), 1500);
-    setInterval(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), SYNC_EVERY_MS);
+    initSyncCursorFromDb().then(() => {
+      console.log(`[sync] ENABLED every ${SYNC_EVERY_MS}ms, lookback=${SYNC_LOOKBACK_BLOCKS} blocks`);
+      setTimeout(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), 1500);
+      setInterval(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), SYNC_EVERY_MS);
+    });
   } else {
     console.log(
       `[sync] DISABLED (ENABLE_CHAIN_SYNC=${ENABLE_CHAIN_SYNC ? "1" : "0"}, supabase=${hasSupabase() ? "ON" : "OFF"})`

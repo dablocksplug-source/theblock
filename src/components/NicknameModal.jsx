@@ -46,6 +46,7 @@ export default function NicknameModal() {
           className="nick-close"
           disabled={loading}
           aria-label="Close"
+          type="button"
         >
           ✖
         </button>
@@ -69,7 +70,7 @@ export default function NicknameModal() {
 
         {error && <div className="nick-error">{error}</div>}
 
-        <button className="nick-submit" onClick={submit} disabled={loading}>
+        <button className="nick-submit" onClick={submit} disabled={loading} type="button">
           {loading ? "Saving..." : "Save Name"}
         </button>
       </div>

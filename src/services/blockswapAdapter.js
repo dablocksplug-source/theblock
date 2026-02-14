@@ -15,10 +15,7 @@ import {
   keccak256,
   encodeAbiParameters,
   toHex,
-  decodeEventLog,
   signatureToHex,
-  // ✅ added
-  hexToSignature,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -61,12 +58,13 @@ const ERC20_PERMIT_ABI = [
   { type: "function", name: "nonces", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
 ];
 
-// ----------- events (for RPC fallback) -----------
+// ----------- events (for RPC fallback; kept for later) -----------
 const EVT_BOUGHT = parseAbiItem(
   "event Bought(address indexed buyer, uint256 ozWei, uint256 usdcTotal, uint256 usdcToVault, uint256 usdcToTreasury)"
 );
 const EVT_SOLD = parseAbiItem("event SoldBack(address indexed seller, uint256 ozWei, uint256 usdcPaid)");
 
+// Topics (kept for later)
 const TOPIC_BOUGHT = keccak256(toHex("Bought(address,uint256,uint256,uint256,uint256)"));
 const TOPIC_SOLD = keccak256(toHex("SoldBack(address,uint256,uint256)"));
 
@@ -84,16 +82,15 @@ let __overrideProvider = null;
 
 // caches
 let __pcCache = { rpc: null, chainId: null, client: null };
-let __pcLogsCache = { rpc: null, chainId: null, client: null };
 let __wcCache = { chainId: null, provider: null, client: null };
 let __rpcLogged = false;
 
-// logs protection (RPC path only)
+// logs protection (RPC path only; kept for later)
 let __logsCooldownUntil = 0;
 let __logsFailStreak = 0;
 const __warnedLabels = new Set();
 
-// activity/holders cache
+// activity/holders cache (kept for later)
 let __activityCache = { atMs: 0, key: "", data: [] };
 let __holdersCache = { atMs: 0, key: "", data: [] };
 
@@ -347,7 +344,7 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (FIXES Coinbase/WC weird outputs)
+// SIGNATURE NORMALIZATION (fixes Coinbase/WC weird outputs)
 // -------------------------------
 function isHexSigLike(s) {
   const t = String(s || "").trim();
@@ -361,6 +358,7 @@ function normalizeSigHex(sig) {
   try {
     if (typeof sig === "string") {
       const trimmed = sig.trim();
+      if (trimmed === "0x" || trimmed.length < 10) return trimmed;
       if (isHexSigLike(trimmed)) return trimmed;
       if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
       return trimmed;
@@ -419,11 +417,13 @@ function expandCompactSig(sigHex) {
 
 function assertSigLen(label, sigHex) {
   const s0 = normalizeSigHex(sigHex);
+  if (!s0 || s0 === "0x") {
+    throw new Error(`${label} missing/blocked (empty). Please approve the signature prompt and try again.`);
+  }
+
   const s = expandCompactSig(s0);
   if (!isHexSigLike(s)) {
-    throw new Error(
-      `${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`
-    );
+    throw new Error(`${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`);
   }
   return s;
 }
@@ -536,7 +536,11 @@ export const blockswapAdapter = {
     const buybackFloorPerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buybackFloorPerBrick" });
     const buyPaused = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buyPaused" });
 
-    const floorLiabilityUSDC = await safeRead(pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "floorLiabilityUSDC" }), 0n, "floorLiabilityUSDC");
+    const floorLiabilityUSDC = await safeRead(
+      pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "floorLiabilityUSDC" }),
+      0n,
+      "floorLiabilityUSDC"
+    );
 
     const treasuryAddr = await safeRead(
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "theBlockTreasury" }),
@@ -731,14 +735,7 @@ export const blockswapAdapter = {
     const buyDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
     const permitDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
 
-    const [
-      inv,
-      sellPricePerBrick,
-      nonce,
-      permitNonce,
-      usdcName,
-      usdcVersion,
-    ] = await Promise.all([
+    const [inv, sellPricePerBrick, nonce, permitNonce, usdcName, usdcVersion] = await Promise.all([
       safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy"),
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" }),
       // relayed-buy nonce (BlockSwap nonces)
@@ -801,7 +798,7 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
-    // ✅ typed data signing via walletClient is usually okay across wallets
+    // ✅ typed data signing via walletClient is usually ok across wallets
     const wc = this._walletClient();
     const rawPermitSig = await wc.signTypedData({
       account: walletAddress,

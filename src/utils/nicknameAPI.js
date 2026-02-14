@@ -7,8 +7,10 @@ import {
   keccak256,
   encodeAbiParameters,
   parseAbiParameters,
+  signatureToHex,
   hexToSignature,
   toHex,
+  toBytes,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -100,7 +102,9 @@ async function resolveRegistryAddress() {
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   const tag = keccak256(toHex("NICKNAME_SET"));
-  const nickHash = keccak256(toHex(nick));
+
+  // ✅ IMPORTANT: must match keccak256(bytes(nick)) in Solidity
+  const nickHash = keccak256(toBytes(String(nick || "")));
 
   return keccak256(
     encodeAbiParameters(
@@ -110,25 +114,68 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   );
 }
 
-function normalizeSigHex(sigHex) {
-  const s = String(sigHex || "").trim();
-  if (!s || !s.startsWith("0x")) throw new Error("Signature missing (wallet popup likely blocked).");
-  // 65-byte = 0x + 130 hex chars => length 132
-  // 64-byte compact = 0x + 128 hex chars => length 130
-  if (s.length !== 132 && s.length !== 130) {
-    throw new Error(`Invalid signature length: ${s.length} (expected 132 or 130).`);
+// -------------------------------
+// SIGNATURE NORMALIZATION (fixes Coinbase/WC weird outputs)
+// -------------------------------
+function isHexSigLike(s) {
+  const t = String(s || "").trim();
+  if (!t.startsWith("0x")) return false;
+  if (!/^0x[0-9a-fA-F]+$/.test(t)) return false;
+  // allow 64-byte compact (0x + 128 => 130 total), or 65-byte (0x + 130 => 132 total)
+  return t.length === 130 || t.length === 132;
+}
+
+function normalizeSigHex(sig) {
+  try {
+    if (typeof sig === "string") {
+      const trimmed = sig.trim();
+      if (!trimmed || trimmed === "0x") throw new Error("Signature missing (wallet popup likely blocked).");
+      // accept any hex-ish; enforce length later
+      if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
+      return trimmed;
+    }
+
+    if (sig && typeof sig === "object") {
+      const r = sig.r || sig.R;
+      const s = sig.s || sig.S;
+      const v = sig.v ?? sig.V;
+      const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
+
+      if (r && s && (v != null || yParity != null)) {
+        return signatureToHex({
+          r,
+          s,
+          ...(v != null ? { v: Number(v) } : {}),
+          ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
+        });
+      }
+
+      if (sig.signature) return normalizeSigHex(sig.signature);
+      return String(sig);
+    }
+
+    return String(sig ?? "");
+  } catch (e) {
+    throw new Error(e?.message || "Signature normalization failed.");
   }
-  return s;
 }
 
 // Expand EIP-2098 compact signature (64 bytes) => 65 bytes
 function expandCompactSig(sigHex) {
-  const s = normalizeSigHex(sigHex);
-  if (s.length === 132) return s; // already 65 bytes
+  const s0 = normalizeSigHex(sigHex);
+  const s = String(s0 || "").trim();
+  if (!s.startsWith("0x")) throw new Error("Signature missing (wallet popup likely blocked).");
 
-  // compact: r(32) || vs(32)
+  // 65-byte already (0x + 130 hex)
+  if (s.length === 132) return s;
+
+  // 64-byte compact (0x + 128 hex)
+  if (s.length !== 130) {
+    throw new Error(`Invalid signature length: ${s.length} (expected 132 or 130).`);
+  }
+
   const r = s.slice(2, 2 + 64);
-  const vs = s.slice(2 + 64);
+  const vs = s.slice(2 + 64); // 64 hex chars
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
   const v = (vsFirstByte & 0x80) ? 28 : 27;
@@ -142,15 +189,23 @@ function expandCompactSig(sigHex) {
   return `0x${r}${sFixed}${vHex}`;
 }
 
+function assertSigLen(label, sigHex) {
+  const s = expandCompactSig(sigHex);
+  if (!isHexSigLike(s)) {
+    throw new Error(`${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`);
+  }
+  return s;
+}
+
 async function personalSign(provider, msgHash, user) {
   // Try common ordering first: [data, address]
   try {
     const sig = await provider.request({ method: "personal_sign", params: [msgHash, user] });
-    return normalizeSigHex(sig);
-  } catch (e1) {
+    return sig;
+  } catch {
     // Some wallets/providers want [address, data]
     const sig = await provider.request({ method: "personal_sign", params: [user, msgHash] });
-    return normalizeSigHex(sig);
+    return sig;
   }
 }
 
@@ -204,12 +259,11 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
 
   // optional sanity
   try {
-    const onchainRelayer = await pc.readContract({
+    await pc.readContract({
       address: registry,
       abi: NICK_RELAYER_VIEW_ABI,
       functionName: "relayer",
     });
-    // console.log("[Nickname] registry:", registry, "onchain relayer:", onchainRelayer);
   } catch {}
 
   const nonce = await pc.readContract({
@@ -232,13 +286,13 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   });
 
   // Sign raw 32-byte hash (contract uses toEthSignedMessageHash(msgHash))
-  const sigHex0 = await personalSign(provider, msgHash, user);
+  const rawSig = await personalSign(provider, msgHash, user);
 
-  // Coinbase/WC can produce compact sig sometimes; expand it for consistent relayer verification
-  const sigHex = expandCompactSig(sigHex0);
+  // ✅ normalize + expand compact signature
+  const signature = assertSigLen("nicknameSignature", rawSig);
 
-  const sig = hexToSignature(sigHex);
-  const v = Number(sig.v);
+  // Relayer may verify either signature hex or v/r/s — we send BOTH (compatible either way)
+  const sigObj = hexToSignature(signature);
 
   const res = await fetch(`${relayerUrl}/relay/nickname`, {
     method: "POST",
@@ -247,10 +301,14 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
       user,
       nick: trimmed,
       deadline,
-      v,
-      r: sig.r,
-      s: sig.s,
-      signature: sigHex,
+
+      // v/r/s for old relayer paths
+      v: Number(sigObj.v),
+      r: sigObj.r,
+      s: sigObj.s,
+
+      // full signature for newer relayer paths
+      signature,
     }),
   });
 
