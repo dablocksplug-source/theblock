@@ -1,4 +1,4 @@
-// src/index.ts
+// theblock-relayer/src/index.ts
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -328,10 +328,41 @@ function lower(a: string) {
   return String(a || "").toLowerCase();
 }
 
-// accept both 0/1 and 27/28
+// ✅ Accept lots of wallet varieties (0/1, 27/28, 35/36, 37/38, etc)
 function normalizeV(v: number): number {
-  if (v === 0 || v === 1) return v + 27;
+  if (!Number.isFinite(v)) return v;
+  if (v === 0 || v === 1) return v + 27; // yParity -> v
+  if (v === 27 || v === 28) return v;
+  if (v === 35) return 27;
+  if (v === 36) return 28;
+  if (v === 37) return 27;
+  if (v === 38) return 28;
+
+  // If chain-adjusted v (EIP-155 style), map by parity:
+  // odd -> 27, even -> 28
+  if (v > 28) return v % 2 === 0 ? 28 : 27;
+
   return v;
+}
+
+// ✅ KEY FIX: normalize raw signature hex BEFORE viem parses it.
+// This prevents "Invalid yParityOrV value" for Coinbase/WC signatures.
+function normalizeSigHex(sigHex: string): `0x${string}` {
+  const sig = String(sigHex || "");
+
+  // must be 65 bytes => 0x + 130 hex chars = length 132
+  if (!/^0x[0-9a-fA-F]{130}$/.test(sig)) return sigHex as `0x${string}`;
+
+  const vHex = sig.slice(-2);
+  let v = parseInt(vHex, 16);
+
+  v = normalizeV(v);
+
+  // normalizeV returns 27/28 for most cases; if not, leave original
+  if (v !== 27 && v !== 28) return sigHex as `0x${string}`;
+
+  const vFixed = v.toString(16).padStart(2, "0");
+  return (sig.slice(0, -2) + vFixed) as `0x${string}`;
 }
 
 /**
@@ -368,6 +399,7 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
   const sKey = prefix ? `${prefix}S` : "s";
   const sigKey = prefix ? `${prefix}Signature` : "signature";
 
+  // v/r/s path
   if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
     const vNumRaw = Number(body[vKey]);
     if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
@@ -377,13 +409,19 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
     const s = body[sKey] as `0x${string}`;
     if (typeof r !== "string" || !r.startsWith("0x") || r.length !== 66) throw new Error(`Invalid ${rKey}`);
     if (typeof s !== "string" || !s.startsWith("0x") || s.length !== 66) throw new Error(`Invalid ${sKey}`);
+
     return { v: vNum, r, s };
   }
 
+  // signature path
   if (body?.[sigKey]) {
     const sigHex = body[sigKey] as `0x${string}`;
     if (typeof sigHex !== "string" || !sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}`);
-    const sig = hexToSignature(sigHex);
+
+    // ✅ normalize BEFORE parsing
+    const fixed = normalizeSigHex(sigHex);
+
+    const sig = hexToSignature(fixed);
     const vNum = normalizeV(Number(sig.v));
     return { v: vNum, r: sig.r, s: sig.s };
   }
@@ -732,7 +770,7 @@ app.post("/admin/sync-now", async (_req, res) => {
     const r = await syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS });
     return sendJson(res, r, r.ok ? 200 : 400);
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: e?.message || "sync failed" }, 400);
+    return sendJson(res, { ok: false, error: e?.shortMessage || e?.message || "sync failed" }, 400);
   }
 });
 
@@ -766,7 +804,8 @@ app.post("/relay/nickname", async (req, res) => {
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay nickname failed" }, 400);
+    const msg = e?.shortMessage || e?.message || zodMsg(e) || "Relay nickname failed";
+    return sendJson(res, { ok: false, error: msg }, 400);
   }
 });
 
@@ -800,7 +839,8 @@ app.post("/relay/buy", async (req, res) => {
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay buy failed" }, 400);
+    const msg = e?.shortMessage || e?.message || zodMsg(e) || "Relay buy failed";
+    return sendJson(res, { ok: false, error: msg }, 400);
   }
 });
 
@@ -847,7 +887,8 @@ app.post("/relay/buy-permit", async (req, res) => {
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay buy-permit failed" }, 400);
+    const msg = e?.shortMessage || e?.message || zodMsg(e) || "Relay buy-permit failed";
+    return sendJson(res, { ok: false, error: msg }, 400);
   }
 });
 
