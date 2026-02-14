@@ -13,20 +13,17 @@ export default function LayoutWrapper({ children }) {
   const { nickname, useNickname } = useNicknameContext();
   const location = useLocation();
 
-  // ✅ TOP header quick links (gated/off for now)
-  const headerLinks = [
-    { name: "BlockMarket", path: "/blockmarket", enabled: false },
-    { name: "TheAlley", path: "/thealley", enabled: false },
-  ];
-
+  // ✅ DISTRICT NAV (BlockMarket added, TheAlley last)
   const navItems = [
     { name: "BlockSwap", path: "/blockswap" },
     { name: "BlockBet", path: "/blockbet" },
     { name: "BlockPlay", path: "/blockplay" },
     { name: "BlockShop", path: "/blockshop" },
+    { name: "BlockMarket", path: "/blockmarket" }, // ✅ NEW
     { name: "BlockPay", path: "/blockpay" },
     { name: "BlockProof", path: "/blockproof" },
     { name: "Lore", path: "/lore" },
+    { name: "TheAlley", path: "/thealley" }, // ✅ LAST
   ];
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
@@ -44,48 +41,9 @@ export default function LayoutWrapper({ children }) {
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100">
       {/* ====== TOP BAR ====== */}
       <header className="w-full py-3 px-6 flex justify-between items-center border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="flex items-center gap-4">
-          <Link to="/" className="text-cyan-400 text-lg font-semibold">
-            The Block
-          </Link>
-
-          {/* ✅ Header links (gated for now) */}
-          <div className="hidden sm:flex items-center gap-2">
-            {headerLinks.map((item) => {
-              const active = location.pathname === item.path;
-
-              if (!item.enabled) {
-                return (
-                  <span
-                    key={item.path}
-                    className={`text-xs px-2 py-1 rounded-lg border select-none ${
-                      active
-                        ? "border-slate-600 text-slate-300"
-                        : "border-slate-800 text-slate-500"
-                    }`}
-                    title="Coming soon"
-                  >
-                    {item.name}
-                  </span>
-                );
-              }
-
-              return (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  className={`text-xs px-2 py-1 rounded-lg border ${
-                    active
-                      ? "border-cyan-400/40 text-cyan-200"
-                      : "border-slate-800 text-slate-400 hover:text-cyan-200 hover:border-cyan-400/30"
-                  }`}
-                >
-                  {item.name}
-                </Link>
-              );
-            })}
-          </div>
-        </div>
+        <Link to="/" className="text-cyan-400 text-lg font-semibold">
+          The Block
+        </Link>
 
         <div className="text-xs text-slate-500 hidden sm:block">
           Building slow. Shipping steady.
@@ -107,7 +65,7 @@ export default function LayoutWrapper({ children }) {
         <WalletPanel />
       </header>
 
-      {/* ====== NAV ROW ====== */}
+      {/* ====== DISTRICT NAV ROW ====== */}
       <nav className="bg-slate-900/60 border-b border-slate-800/40">
         <div className="mx-auto max-w-6xl px-4">
           <div className="flex items-center gap-6 py-3 overflow-x-auto whitespace-nowrap scrollbar-thin scrollbar-thumb-slate-700/60">
@@ -129,13 +87,15 @@ export default function LayoutWrapper({ children }) {
       </nav>
 
       {/* ====== MAIN CONTENT ====== */}
-      <main className="px-6 py-10">{children ?? <Outlet />}</main>
+      <main className="px-6 py-10">
+        {children ?? <Outlet />}
+      </main>
 
       <footer className="border-t border-slate-800 py-4 text-center text-xs text-slate-600">
         © {new Date().getFullYear()} The Block.
       </footer>
 
-      {/* Nickname modal is self-managed (reads modalOpen from context) */}
+      {/* Nickname modal is self-managed */}
       <NicknameModal />
     </div>
   );
