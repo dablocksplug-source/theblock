@@ -38,7 +38,6 @@ function Root() {
             <SoundProvider>
               <WalletProvider>
                 <NicknameProvider>
-                  {/* ✅ ROUTES ARE REQUIRED for <Outlet /> to work */}
                   <Routes>
                     <Route element={<App />}>
                       {/* ✅ Home */}
@@ -52,11 +51,16 @@ function Root() {
                       <Route path="blockpay" element={<BlockPay />} />
                       <Route path="blockproof" element={<BlockProof />} />
 
+                      {/* ✅ Future URLs (no 404 / no missing imports) */}
+                      <Route path="alley" element={<BlockSwap />} />
+                      <Route path="thealley" element={<BlockSwap />} /> {/* ✅ alias */}
+                      <Route path="blockmarket" element={<BlockSwap />} />
+
                       {/* ✅ Info routes */}
                       <Route path="lore" element={<Lore />} />
                       <Route path="investor" element={<InvestorOverview />} />
 
-                      {/* ✅ Catch-all */}
+                      {/* ✅ Catch-all (NO 404s while building districts) */}
                       <Route path="*" element={<BlockSwap />} />
                     </Route>
                   </Routes>

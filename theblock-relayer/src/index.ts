@@ -49,6 +49,9 @@ const SUPABASE_REQ_TIMEOUT_MS = Number(ENV.SUPABASE_REQ_TIMEOUT_MS || 7000);
 const SYNC_ON_RELAY = String(ENV.SYNC_ON_RELAY || "1") === "1";
 const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 
+// ✅ PATCH: optional admin key for /admin/sync-now
+const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
+
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
 if (!BLOCKSWAP_ADDRESS || !isAddress(BLOCKSWAP_ADDRESS)) {
@@ -183,6 +186,9 @@ const EVT_SOLD = parseAbiItem("event SoldBack(address indexed seller, uint256 oz
 // --------------------
 const app = express();
 
+// ✅ PATCH: trust proxy for Fly/Vercel/etc so x-forwarded-for works
+app.set("trust proxy", 1);
+
 // ✅ Safe JSON (stringify bigint)
 function sendJson(res: any, obj: any, status = 200) {
   return res
@@ -205,14 +211,22 @@ const allowlist = new Set<string>([
 
 if (UI_ORIGIN) allowlist.add(UI_ORIGIN);
 
+// ✅ PATCH: allow common Vercel preview domains for your project
+// Example: https://theblock-xxxxxx.vercel.app
+const vercelPreviewRegexes: RegExp[] = [
+  /^https:\/\/theblock(-[a-z0-9-]+)?\.vercel\.app$/i,
+  /^https:\/\/theblock-ui(-[a-z0-9-]+)?\.vercel\.app$/i,
+];
+
 const corsOptions: cors.CorsOptions = {
   origin(origin, cb) {
     if (!origin) return cb(null, true);
     if (allowlist.has(origin)) return cb(null, true);
+    if (vercelPreviewRegexes.some((re) => re.test(origin))) return cb(null, true);
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Admin-Key"],
   credentials: false,
   maxAge: 86400,
 };
@@ -220,6 +234,16 @@ const corsOptions: cors.CorsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "256kb" }));
+
+// ✅ PATCH: CORS error handler (otherwise it can look like a random failure)
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!err) return next();
+  const msg = String(err?.message || "");
+  if (msg.toLowerCase().includes("cors blocked")) {
+    return sendJson(res, { ok: false, error: msg }, 403);
+  }
+  return next(err);
+});
 
 // --------------------
 // tiny rate limit
@@ -783,10 +807,16 @@ app.get("/feed/holders", async (req, res) => {
   }
 });
 
-// ✅ Manual sync trigger (prevents 404)
-app.post("/admin/sync-now", async (_req, res) => {
+// ✅ Manual sync trigger (prevents 404) + ✅ PATCH: optional admin key protection
+app.post("/admin/sync-now", async (req, res) => {
   try {
     if (!ENABLE_CHAIN_SYNC) return sendJson(res, { ok: false, error: "sync_disabled" }, 400);
+
+    if (ADMIN_KEY) {
+      const key = String(req.headers["x-admin-key"] || "").trim();
+      if (!key || key !== ADMIN_KEY) return sendJson(res, { ok: false, error: "unauthorized" }, 401);
+    }
+
     const r = await syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS });
     return sendJson(res, r, r.ok ? 200 : 400);
   } catch (e: any) {
@@ -924,6 +954,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Supabase: ${hasSupabase() ? "ON" : "OFF"}`);
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);
+  console.log(`Admin key: ${ADMIN_KEY ? "ON" : "OFF"}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
     console.log(`[sync] ENABLED every ${SYNC_EVERY_MS}ms, lookback=${SYNC_LOOKBACK_BLOCKS} blocks`);

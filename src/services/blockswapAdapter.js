@@ -17,6 +17,8 @@ import {
   toHex,
   decodeEventLog,
   signatureToHex,
+  // ✅ added
+  hexToSignature,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -224,6 +226,7 @@ function clearOverrideProvider() {
 }
 
 function pickEip1193Provider() {
+  // ✅ prefer the ACTIVE connector provider passed from WalletContext
   if (__overrideProvider && typeof __overrideProvider.request === "function") return __overrideProvider;
 
   const eth = window?.ethereum;
@@ -322,279 +325,6 @@ function resolveLogsRpcUrl() {
   return logs;
 }
 
-async function calcLogRange(pc, lookbackBlocks, hardCap = 25_000) {
-  const latest = await pc.getBlockNumber();
-  const raw = Number(lookbackBlocks || 0);
-  const capped = Math.max(1, Math.min(raw || 1, hardCap));
-  const lb = BigInt(capped);
-
-  let fromBlock = 1n;
-  if (latest > lb) fromBlock = latest - lb;
-  if (fromBlock < 1n) fromBlock = 1n;
-
-  return { latest, fromBlock };
-}
-
-function isLogsFailure(e) {
-  const msg = String(e?.shortMessage || e?.message || e || "");
-  return (
-    msg.includes("400") ||
-    msg.includes("401") ||
-    msg.includes("403") ||
-    msg.includes("404") ||
-    msg.includes("408") ||
-    msg.includes("410") ||
-    msg.includes("429") ||
-    msg.includes("500") ||
-    msg.includes("502") ||
-    msg.includes("503") ||
-    msg.includes("504") ||
-    /forbidden/i.test(msg) ||
-    /rate/i.test(msg) ||
-    /timeout/i.test(msg) ||
-    /failed/i.test(msg) ||
-    /HttpRequestError/i.test(msg) ||
-    /PAYG/i.test(msg)
-  );
-}
-
-function bumpLogsCooldown() {
-  __logsFailStreak = Math.min(__logsFailStreak + 1, 3);
-  const ms = __logsFailStreak === 1 ? 90_000 : __logsFailStreak === 2 ? 180_000 : 420_000;
-  __logsCooldownUntil = nowMs() + ms;
-}
-
-function clearLogsFailStreak() {
-  __logsFailStreak = 0;
-}
-
-function clampBigInt(v, min, max) {
-  if (v < min) return min;
-  if (v > max) return max;
-  return v;
-}
-
-function toBlockHex(n) {
-  if (n === "latest" || n === "pending" || n === "earliest") return n;
-  let b;
-  try {
-    b = typeof n === "bigint" ? n : BigInt(n);
-  } catch {
-    throw new Error(`Bad block value for JSON-RPC: ${String(n)}`);
-  }
-  if (b < 0n) throw new Error(`Negative block: ${b.toString()}`);
-  return `0x${b.toString(16)}`;
-}
-
-let __lastRpcFailSig = "";
-
-async function rpcPost(url, payload, dbgLabel = "", { timeoutMs = 20_000 } = {}) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-
-    const text = await res.text();
-
-    let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch {}
-
-    if (!res.ok) {
-      const sig = `${res.status}|${payload?.method}|${payload?.params?.[0]?.address || ""}|${payload?.params?.[0]?.fromBlock || ""}|${payload?.params?.[0]?.toBlock || ""}`;
-      if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
-        __lastRpcFailSig = sig;
-        console.error("[BlockSwap][RPC HTTP FAIL]", {
-          status: res.status,
-          dbgLabel,
-          url,
-          payload,
-          responsePreview: String(text || "").slice(0, 500),
-        });
-      }
-
-      const msg = json?.error?.message || String(text || "").slice(0, 180) || `HTTP ${res.status}`;
-      const err = new Error(msg);
-      err.status = res.status;
-      err.raw = text;
-      throw err;
-    }
-
-    if (json?.error) {
-      const sig = `jsonerr|${payload?.method}|${json?.error?.code || ""}`;
-      if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
-        __lastRpcFailSig = sig;
-        console.error("[BlockSwap][RPC JSON ERROR]", { dbgLabel, url, payload, error: json.error });
-      }
-      const err = new Error(json.error.message || "RPC error");
-      err.code = json.error.code;
-      err.data = json.error.data;
-      throw err;
-    }
-
-    return json?.result;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function getLogsRaw({ rpcUrl, address, fromBlock, toBlock, topic0 }) {
-  const payload = {
-    jsonrpc: "2.0",
-    id: Date.now(),
-    method: "eth_getLogs",
-    params: [
-      {
-        address,
-        fromBlock: toBlockHex(fromBlock),
-        toBlock: toBlockHex(toBlock),
-        topics: topic0 ? [topic0] : [],
-      },
-    ],
-  };
-
-  return rpcPost(rpcUrl, payload, "eth_getLogs");
-}
-
-async function getLogsChunkedSafe(
-  pc,
-  { address, event, fromBlock, toBlock, label, chunkSize = 900n, maxChunks = 12, maxLogs = 400, force = false, rpcUrl = "", topic0 = "", decodeEvent = null }
-) {
-  if (!force && nowMs() < __logsCooldownUntil) return [];
-
-  const from = BigInt(fromBlock);
-  const to = BigInt(toBlock);
-  if (to < from) return [];
-
-  let size = chunkSize < 1n ? 1n : chunkSize;
-
-  const out = [];
-  let cursor = from;
-  let chunks = 0;
-
-  let loggedOnce = false;
-
-  while (cursor <= to) {
-    if (chunks >= maxChunks) break;
-    if (out.length >= maxLogs) break;
-
-    const end = cursor + size - 1n <= to ? cursor + size - 1n : to;
-
-    try {
-      const logs = await pc.getLogs({ address, event, fromBlock: cursor, toBlock: end });
-      if (Array.isArray(logs) && logs.length) {
-        out.push(...logs);
-        if (out.length >= maxLogs) break;
-      }
-      chunks += 1;
-      cursor = end + 1n;
-    } catch (e) {
-      const msg = String(e?.shortMessage || e?.message || e || "");
-
-      if (label && !__warnedLabels.has(label)) {
-        __warnedLabels.add(label);
-        if (DEBUG_LOGS) console.warn(`[logs] ${label} failed:`, msg);
-      }
-      if (isLogsFailure(e)) bumpLogsCooldown();
-
-      // raw fallback
-      if (rpcUrl && topic0 && decodeEvent) {
-        try {
-          if (DEBUG_LOGS && !loggedOnce) {
-            loggedOnce = true;
-            console.warn("[logs] switching to RAW eth_getLogs fallback for:", label);
-          }
-
-          const raw = await getLogsRaw({ rpcUrl, address, fromBlock: cursor, toBlock: end, topic0 });
-
-          if (Array.isArray(raw) && raw.length) {
-            for (const r of raw) {
-              try {
-                const decoded = decodeEventLog({ abi: [decodeEvent], data: r.data, topics: r.topics });
-
-                out.push({
-                  args: decoded.args,
-                  blockNumber: BigInt(r.blockNumber),
-                  transactionHash: r.transactionHash,
-                });
-              } catch {}
-            }
-            if (out.length >= maxLogs) break;
-          }
-
-          chunks += 1;
-          cursor = end + 1n;
-          continue;
-        } catch (rawErr) {
-          const rawMsg = String(rawErr?.message || rawErr || "");
-          if (DEBUG_LOGS && !loggedOnce) {
-            loggedOnce = true;
-            console.warn("[logs] RAW fallback failed:", rawMsg);
-          }
-        }
-      }
-
-      // shrink chunk and retry
-      if (size > 200n) size = clampBigInt(size / 2n, 200n, 2000n);
-      else return [];
-      continue;
-    }
-  }
-
-  clearLogsFailStreak();
-  return out.slice(0, maxLogs);
-}
-
-function makeKey(obj) {
-  try {
-    return JSON.stringify(obj);
-  } catch {
-    return String(Math.random());
-  }
-}
-
-function shouldUseCache(cache, ttlMs, key) {
-  const now = Date.now();
-  return cache.data && cache.key === key && now - cache.atMs < ttlMs;
-}
-
-function fmtTsFromBlock(blockNumber) {
-  return blockNumber ? `#${Number(blockNumber).toLocaleString()}` : "";
-}
-
-function pickNum(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function supaOk() {
-  return !!supabase;
-}
-
-// Parse helpers used by relayer/supabase
-function parseOzWeiToOz(ozWei) {
-  try {
-    const b = BigInt(String(ozWei || "0"));
-    return pickNum(formatUnits(b, 18), 0);
-  } catch {
-    return 0;
-  }
-}
-function parseUsdc6ToNum(usdc6) {
-  try {
-    const b = BigInt(String(usdc6 || "0"));
-    return pickNum(formatUnits(b, 6), 0);
-  } catch {
-    return 0;
-  }
-}
-
 // -------------------------------
 // Permit helpers (gasless buy)
 // -------------------------------
@@ -616,27 +346,6 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
   );
 }
 
-async function getPermitDomain({ pc, usdc, chainId }) {
-  const name = await safeRead(
-    pc.readContract({ address: usdc, abi: ERC20_PERMIT_ABI, functionName: "name" }),
-    "USDC",
-    "USDC.name"
-  );
-
-  const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
-  if (forced) {
-    return { name, version: forced, chainId: Number(chainId), verifyingContract: usdc };
-  }
-
-  const version = await safeRead(
-    pc.readContract({ address: usdc, abi: ERC20_PERMIT_ABI, functionName: "version" }),
-    "1",
-    "USDC.version"
-  );
-
-  return { name, version: String(version || "1"), chainId: Number(chainId), verifyingContract: usdc };
-}
-
 // -------------------------------
 // SIGNATURE NORMALIZATION (FIXES Coinbase/WC weird outputs)
 // -------------------------------
@@ -644,54 +353,25 @@ function isHexSigLike(s) {
   const t = String(s || "").trim();
   if (!t.startsWith("0x")) return false;
   if (!/^0x[0-9a-fA-F]+$/.test(t)) return false;
-  // allow 64-byte compact (0x + 128), or 65-byte (0x + 130), or 66/67 variants used by some libs
-  return t.length === 130 || t.length === 132 || t.length === 134;
-}
-
-function extractHexSigFromString(s) {
-  const t = String(s || "");
-  // find a 0x + 128/130/132 hex sequence in the string
-  const m =
-    t.match(/0x[0-9a-fA-F]{128}\b/) ||
-    t.match(/0x[0-9a-fA-F]{130}\b/) ||
-    t.match(/0x[0-9a-fA-F]{132}\b/);
-  return m ? m[0] : "";
+  // allow 64-byte compact (0x + 128 => 130 total), or 65-byte (0x + 130 => 132 total)
+  return t.length === 130 || t.length === 132;
 }
 
 function normalizeSigHex(sig) {
   try {
-    // already a proper hex signature
     if (typeof sig === "string") {
       const trimmed = sig.trim();
-
       if (isHexSigLike(trimmed)) return trimmed;
-
-      // sometimes wallets return JSON stringified sig objects
-      if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-        try {
-          const parsed = JSON.parse(trimmed);
-          return normalizeSigHex(parsed);
-        } catch {}
-      }
-
-      // sometimes it's a long blob but contains the hex sig inside
-      const extracted = extractHexSigFromString(trimmed);
-      if (isHexSigLike(extracted)) return extracted;
-
-      // last resort: if it’s pure hex but wrong length, still return (relayer will reject)
       if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
-
       return trimmed;
     }
 
-    // object signature: { r, s, v } or { r, s, yParity }
     if (sig && typeof sig === "object") {
       const r = sig.r || sig.R;
       const s = sig.s || sig.S;
       const v = sig.v ?? sig.V;
       const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
 
-      // viem signatureToHex accepts { r, s, v } or { r, s, yParity }
       if (r && s && (v != null || yParity != null)) {
         const hex = signatureToHex({
           r,
@@ -702,10 +382,7 @@ function normalizeSigHex(sig) {
         return hex;
       }
 
-      // nested objects?
       if (sig.signature) return normalizeSigHex(sig.signature);
-
-      // fallback stringification
       return String(sig);
     }
 
@@ -715,15 +392,51 @@ function normalizeSigHex(sig) {
   }
 }
 
-function assertSigLen(label, sigHex) {
+// ✅ expand compact EIP-2098 signature (64 bytes) => 65 bytes
+function expandCompactSig(sigHex) {
   const s = String(sigHex || "").trim();
-  const ok = isHexSigLike(s);
-  if (!ok) {
+  if (!s.startsWith("0x")) return s;
+
+  // 65-byte already (0x + 130 hex)
+  if (s.length === 132) return s;
+
+  // 64-byte compact (0x + 128 hex)
+  if (s.length !== 130) return s;
+
+  const r = s.slice(2, 2 + 64);
+  const vs = s.slice(2 + 64); // 64 hex chars
+
+  const vsFirstByte = parseInt(vs.slice(0, 2), 16);
+  const v = (vsFirstByte & 0x80) ? 28 : 27;
+
+  const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
+  const sRest = vs.slice(2);
+  const sFixed = sFirstByte + sRest;
+
+  const vHex = v.toString(16).padStart(2, "0");
+  return `0x${r}${sFixed}${vHex}`;
+}
+
+function assertSigLen(label, sigHex) {
+  const s0 = normalizeSigHex(sigHex);
+  const s = expandCompactSig(s0);
+  if (!isHexSigLike(s)) {
     throw new Error(
-      `${label} length invalid. Got ${s.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
+      `${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`
     );
   }
   return s;
+}
+
+// ✅ personal_sign helper (wallets differ on param ordering)
+async function personalSign(provider, msgHash, user) {
+  try {
+    const sig = await provider.request({ method: "personal_sign", params: [msgHash, user] });
+    return sig;
+  } catch {
+    const sig = await provider.request({ method: "personal_sign", params: [user, msgHash] });
+    return sig;
+  }
 }
 
 // -------------------------------
@@ -754,7 +467,7 @@ export const blockswapAdapter = {
 
   logsStatus() {
     const left = Math.max(0, __logsCooldownUntil - nowMs());
-    return { cooldownMs: left, failStreak: __logsFailStreak, supabase: supaOk(), relayer: relayerOk() };
+    return { cooldownMs: left, failStreak: __logsFailStreak, supabase: !!supabase, relayer: relayerOk() };
   },
   resetLogsCooldown() {
     __logsCooldownUntil = 0;
@@ -768,14 +481,13 @@ export const blockswapAdapter = {
     const rpc = resolveRpcUrl();
     const logsRpc = resolveLogsRpcUrl();
 
-    // ✅ ONLY log sensitive RPC info when DEBUG_LOGS=1
     if (DEBUG_LOGS && !__rpcLogged) {
       __rpcLogged = true;
       console.log("[BlockSwap] RPC:", rpc);
       console.log("[BlockSwap] Logs RPC:", logsRpc);
       console.log("[BlockSwap] Deployments URL:", DEPLOYMENTS_URL);
       console.log("[BlockSwap] Relayer URL:", resolveRelayerUrl() || "(not set)");
-      console.log("[BlockSwap] Supabase:", supaOk() ? "ON" : "OFF");
+      console.log("[BlockSwap] Supabase:", supabase ? "ON" : "OFF");
       if (looksLikeAlchemyMissingKey(import.meta.env.VITE_RPC_URL_LOGS)) {
         console.warn("[BlockSwap] VITE_RPC_URL_LOGS looks like missing an Alchemy key; reusing VITE_RPC_URL.");
       }
@@ -791,23 +503,6 @@ export const blockswapAdapter = {
     });
 
     __pcCache = { rpc, chainId: Number(C.CHAIN_ID), client };
-    return client;
-  },
-
-  _publicLogsClient() {
-    const chain = chainFromConfig();
-    const rpc = resolveLogsRpcUrl();
-
-    if (__pcLogsCache.client && __pcLogsCache.rpc === rpc && __pcLogsCache.chainId === Number(C.CHAIN_ID)) {
-      return __pcLogsCache.client;
-    }
-
-    const client = createPublicClient({
-      chain,
-      transport: http(rpc, { retryCount: 1, retryDelay: 650, timeout: 25_000 }),
-    });
-
-    __pcLogsCache = { rpc, chainId: Number(C.CHAIN_ID), client };
     return client;
   },
 
@@ -865,14 +560,14 @@ export const blockswapAdapter = {
     const sellPerBrickStr = formatUnits(sellPricePerBrick, 6);
     const floorPerBrickStr = formatUnits(buybackFloorPerBrick, 6);
 
-    const ounceSellPrice = pickNum(sellPerBrickStr, 0) / OUNCES_PER_BRICK;
-    const ounceBuybackFloor = pickNum(floorPerBrickStr, 0) / OUNCES_PER_BRICK;
+    const ounceSellPrice = Number(sellPerBrickStr || 0) / OUNCES_PER_BRICK;
+    const ounceBuybackFloor = Number(floorPerBrickStr || 0) / OUNCES_PER_BRICK;
 
     let coverageDisplay = "—";
     if (floorLiabilityUSDC === 0n) coverageDisplay = "∞";
     else {
       const ratio6 = (swapUsdcBal * 1_000_000n) / floorLiabilityUSDC;
-      coverageDisplay = (pickNum(formatUnits(ratio6, 6), 0) || 0).toFixed(3);
+      coverageDisplay = (Number(formatUnits(ratio6, 6)) || 0).toFixed(3);
     }
 
     return {
@@ -895,7 +590,7 @@ export const blockswapAdapter = {
       swapUsdcBal,
 
       ozInventoryWei: swapOzBal,
-      ozInventory: pickNum(formatUnits(swapOzBal, 18), 0),
+      ozInventory: Number(formatUnits(swapOzBal, 18)) || 0,
 
       ounceSellPrice,
       ounceBuybackFloor,
@@ -1023,7 +718,7 @@ export const blockswapAdapter = {
   // ===== GASLESS BUY (permit + relayed buy) =====
   async buyOzGasless({ walletAddress, ouncesWhole, deadlineSecs = 600 }) {
     const relayerUrl = resolveRelayerUrl();
-    if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL in the UI (.env.local).");
+    if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL in the UI (.env.local / Vercel env).");
 
     const { SWAP, OZ, USDC } = await resolveAddresses();
     if (!walletAddress) throw new Error("Connect wallet.");
@@ -1041,7 +736,6 @@ export const blockswapAdapter = {
       sellPricePerBrick,
       nonce,
       permitNonce,
-      // permit domain pieces (safe)
       usdcName,
       usdcVersion,
     ] = await Promise.all([
@@ -1077,15 +771,10 @@ export const blockswapAdapter = {
       chainId: Number(C.CHAIN_ID),
     });
 
-    const wc = this._walletClient();
+    // ✅ Use the ACTIVE EIP-1193 provider for personal_sign (fixes Coinbase/WC)
+    const eip1193 = mustProvider();
+    const rawBuySig = await personalSign(eip1193, msgHash, walletAddress);
 
-    // ✅ wallet popups should happen ASAP after preflight
-    const rawBuySig = await wc.signMessage({
-      account: walletAddress,
-      message: { raw: msgHash },
-    });
-
-    // domain (use forced override if present)
     const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
     const domain = {
       name: usdcName,
@@ -1112,6 +801,8 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
+    // ✅ typed data signing via walletClient is usually okay across wallets
+    const wc = this._walletClient();
     const rawPermitSig = await wc.signTypedData({
       account: walletAddress,
       domain,
@@ -1120,9 +811,9 @@ export const blockswapAdapter = {
       message,
     });
 
-    // ✅ normalize & validate signatures BEFORE posting
-    const buySignature = assertSigLen("buySignature", normalizeSigHex(rawBuySig));
-    const permitSignature = assertSigLen("permitSignature", normalizeSigHex(rawPermitSig));
+    // ✅ normalize + expand compact signatures BEFORE posting
+    const buySignature = assertSigLen("buySignature", rawBuySig);
+    const permitSignature = assertSigLen("permitSignature", rawPermitSig);
 
     const endpoint = `${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`;
 
@@ -1133,6 +824,7 @@ export const blockswapAdapter = {
         ozWei: ozWei.toString(),
         buyDeadline: Number(buyDeadline),
         buySignature,
+
         permitValue: permitValue.toString(),
         permitDeadline: Number(permitDeadline),
         permitSignature,

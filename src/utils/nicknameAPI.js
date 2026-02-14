@@ -1,13 +1,19 @@
 // src/utils/nicknameAPI.js
 import { BLOCKSWAP_CONFIG as C } from "../config/blockswap.config";
-import { createPublicClient, http, isAddress, keccak256, encodeAbiParameters, parseAbiParameters, toHex } from "viem";
+import {
+  createPublicClient,
+  http,
+  isAddress,
+  keccak256,
+  encodeAbiParameters,
+  parseAbiParameters,
+  hexToSignature,
+  toHex,
+} from "viem";
 import { baseSepolia, base } from "viem/chains";
 
 function sanitizeUrl(u) {
-  return String(u || "")
-    .trim()
-    .replace(/^"+|"+$/g, "")
-    .replace(/\s+/g, "");
+  return String(u || "").trim().replace(/^"+|"+$/g, "").replace(/\s+/g, "");
 }
 
 function chainFromConfig() {
@@ -51,22 +57,15 @@ const NICK_ABI = [
   },
 ];
 
-// optional (helps you debug relayer mismatch quickly)
+// optional
 const NICK_RELAYER_VIEW_ABI = [
-  {
-    type: "function",
-    name: "relayer",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "address" }],
-  },
+  { type: "function", name: "relayer", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
 ];
 
 async function resolveRegistryAddress() {
   const addr = sanitizeUrl(import.meta.env.VITE_NICKNAME_REGISTRY_ADDRESS);
   if (addr && isAddress(addr)) return addr;
 
-  // Optional deployments fallback
   const url = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
   try {
     const res = await fetch(url, { cache: "no-store" });
@@ -82,19 +81,15 @@ async function resolveRegistryAddress() {
 
       if (fromJson && isAddress(fromJson)) return fromJson;
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 
-  throw new Error(
-    "Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS in .env.local (and restart dev server)."
-  );
+  throw new Error("Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS in Vercel + .env.local.");
 }
 
 /**
  * MUST match Solidity exactly:
  * msgHash = keccak256(abi.encode(
- *   keccak256(bytes("NICKNAME_SET")),
+ *   keccak256("NICKNAME_SET"),
  *   user,
  *   keccak256(bytes(nick)),
  *   nonce,
@@ -105,7 +100,7 @@ async function resolveRegistryAddress() {
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   const tag = keccak256(toHex("NICKNAME_SET"));
-  const nickHash = keccak256(toHex(nick)); // utf-8 bytes
+  const nickHash = keccak256(toHex(nick));
 
   return keccak256(
     encodeAbiParameters(
@@ -115,119 +110,47 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   );
 }
 
-// ------------------------------
-// Signature helpers (bulletproof)
-// ------------------------------
-function hexToBytesLen(hex) {
-  const h = String(hex || "");
-  if (!h.startsWith("0x")) return 0;
-  return (h.length - 2) / 2;
-}
-
-function strip0x(h) {
-  return String(h || "").startsWith("0x") ? String(h).slice(2) : String(h || "");
-}
-
-function pad0x(h) {
-  return String(h || "").startsWith("0x") ? String(h) : `0x${h}`;
-}
-
-/**
- * Parse signature hex into { v, r, s } supporting:
- * - 65-byte signatures (r,s,v)
- * - 64-byte EIP-2098 signatures (r,vs)
- * And normalize v to 27/28.
- */
-function parseSignatureFlexible(sigHex) {
-  const sig = String(sigHex || "").toLowerCase();
-  const nBytes = hexToBytesLen(sig);
-
-  if (nBytes === 65) {
-    const raw = strip0x(sig);
-    const r = pad0x(raw.slice(0, 64));
-    const s = pad0x(raw.slice(64, 128));
-    let v = parseInt(raw.slice(128, 130), 16);
-
-    // normalize v
-    if (v === 0 || v === 1) v = 27 + v;
-    if (v >= 35) v = 27 + (v % 2); // if someone returns EIP-155-ish v, normalize
-    if (v !== 27 && v !== 28) {
-      // last resort
-      v = 27 + (v & 1);
-    }
-
-    return { v, r, s, signature: sig };
+function normalizeSigHex(sigHex) {
+  const s = String(sigHex || "").trim();
+  if (!s || !s.startsWith("0x")) throw new Error("Signature missing (wallet popup likely blocked).");
+  // 65-byte = 0x + 130 hex chars => length 132
+  // 64-byte compact = 0x + 128 hex chars => length 130
+  if (s.length !== 132 && s.length !== 130) {
+    throw new Error(`Invalid signature length: ${s.length} (expected 132 or 130).`);
   }
-
-  if (nBytes === 64) {
-    // EIP-2098: r (32) + vs (32)
-    const raw = strip0x(sig);
-    const r = pad0x(raw.slice(0, 64));
-    const vsHex = raw.slice(64, 128);
-    const vs = BigInt(`0x${vsHex}`);
-
-    // highest bit is vParity
-    const vParity = Number((vs >> 255n) & 1n);
-    const sMask = (1n << 255n) - 1n;
-    const sBI = vs & sMask;
-
-    const s = pad0x(sBI.toString(16).padStart(64, "0"));
-    const v = 27 + vParity;
-
-    return { v, r, s, signature: sig };
-  }
-
-  throw new Error(`Invalid signature length. Got ${String(sigHex || "").length} chars; expected 130/132 hex (0x + 128/130).`);
+  return s;
 }
 
-/**
- * Some wallets disagree on param order for personal_sign.
- * Try standard first: [data, address], then fallback [address, data].
- */
-async function personalSign(provider, dataHex, address) {
+// Expand EIP-2098 compact signature (64 bytes) => 65 bytes
+function expandCompactSig(sigHex) {
+  const s = normalizeSigHex(sigHex);
+  if (s.length === 132) return s; // already 65 bytes
+
+  // compact: r(32) || vs(32)
+  const r = s.slice(2, 2 + 64);
+  const vs = s.slice(2 + 64);
+
+  const vsFirstByte = parseInt(vs.slice(0, 2), 16);
+  const v = (vsFirstByte & 0x80) ? 28 : 27;
+
+  // clear highest bit of vs to get s
+  const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
+  const sRest = vs.slice(2);
+  const sFixed = sFirstByte + sRest;
+
+  const vHex = v.toString(16).padStart(2, "0");
+  return `0x${r}${sFixed}${vHex}`;
+}
+
+async function personalSign(provider, msgHash, user) {
+  // Try common ordering first: [data, address]
   try {
-    return await provider.request({
-      method: "personal_sign",
-      params: [dataHex, address],
-    });
+    const sig = await provider.request({ method: "personal_sign", params: [msgHash, user] });
+    return normalizeSigHex(sig);
   } catch (e1) {
-    try {
-      return await provider.request({
-        method: "personal_sign",
-        params: [address, dataHex],
-      });
-    } catch (e2) {
-      throw new Error(e2?.message || e1?.message || "personal_sign failed");
-    }
-  }
-}
-
-/**
- * Optional: attempt to switch chain if wallet is on wrong network.
- * Safe no-op if wallet doesn't support it.
- */
-async function ensureWalletChain(provider, targetChainId) {
-  if (!provider?.request || !targetChainId) return;
-
-  let currentHex = null;
-  try {
-    currentHex = await provider.request({ method: "eth_chainId", params: [] });
-  } catch {
-    return;
-  }
-
-  const cur = Number.parseInt(String(currentHex || "0x0"), 16);
-  const target = Number(targetChainId);
-
-  if (!cur || !target || cur === target) return;
-
-  try {
-    await provider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: `0x${target.toString(16)}` }],
-    });
-  } catch {
-    // ignore (some connectors won't allow programmatic switching)
+    // Some wallets/providers want [address, data]
+    const sig = await provider.request({ method: "personal_sign", params: [user, msgHash] });
+    return normalizeSigHex(sig);
   }
 }
 
@@ -255,13 +178,11 @@ export async function getNickname(walletAddress) {
 
 /**
  * Gasless nickname (relayer pays gas)
- * ✅ Accept CONNECTED EIP-1193 provider so it works with MetaMask/Coinbase/WC.
- * ✅ Do NOT rely on vParity-only; we normalize signature for all wallets.
- * ✅ Send both `signature` and v/r/s for backward-compatible relayers.
+ * ✅ Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC) to avoid signer mismatch.
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
-  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL (UI) — set it in .env.local and restart.");
+  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL — set it in Vercel + .env.local.");
 
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
@@ -270,10 +191,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   if (trimmed.length < 3 || trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
 
   const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
-  if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 provider missing).");
-
-  // optional chain switch attempt (helps Coinbase/WC mobile)
-  await ensureWalletChain(provider, Number(C.CHAIN_ID));
+  if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 missing).");
 
   const chain = chainFromConfig();
   const rpc = resolveRpcUrl();
@@ -284,15 +202,14 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     transport: http(rpc, { timeout: 20_000, retryCount: 1, retryDelay: 450 }),
   });
 
-  // (optional) sanity check for relayer mismatch
+  // optional sanity
   try {
     const onchainRelayer = await pc.readContract({
       address: registry,
       abi: NICK_RELAYER_VIEW_ABI,
       functionName: "relayer",
     });
-    // keep as debug-only (won't break)
-    console.log("[Nickname] registry:", registry, "onchain relayer:", onchainRelayer);
+    // console.log("[Nickname] registry:", registry, "onchain relayer:", onchainRelayer);
   } catch {}
 
   const nonce = await pc.readContract({
@@ -303,7 +220,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   });
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const deadline = nowSec + 600; // 10 minutes
+  const deadline = nowSec + 600;
 
   const msgHash = nicknameMsgHash({
     user,
@@ -314,41 +231,38 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     chainId: Number(C.CHAIN_ID),
   });
 
-  // ✅ sign raw 32-byte hash (contract uses toEthSignedMessageHash(msgHash))
-  const sigHex = await personalSign(provider, msgHash, user);
+  // Sign raw 32-byte hash (contract uses toEthSignedMessageHash(msgHash))
+  const sigHex0 = await personalSign(provider, msgHash, user);
 
-  // ✅ flexible parsing supports 65 + 64 bytes, and normalizes v
-  const { v, r, s, signature } = parseSignatureFlexible(sigHex);
+  // Coinbase/WC can produce compact sig sometimes; expand it for consistent relayer verification
+  const sigHex = expandCompactSig(sigHex0);
+
+  const sig = hexToSignature(sigHex);
+  const v = Number(sig.v);
 
   const res = await fetch(`${relayerUrl}/relay/nickname`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    cache: "no-store",
     body: JSON.stringify({
       user,
       nick: trimmed,
       deadline,
-      // Back-compat fields (if your relayer still expects them)
       v,
-      r,
-      s,
-      // Preferred: let relayer normalize/verify from full signature
-      signature,
+      r: sig.r,
+      s: sig.s,
+      signature: sigHex,
     }),
   });
 
   const j = await res.json().catch(() => null);
   if (!res.ok || !j?.ok) {
-    if (res.status === 404) {
-      throw new Error(`Relayer 404 at ${relayerUrl}/relay/nickname (wrong URL/port or relayer not running).`);
-    }
+    if (res.status === 404) throw new Error(`Relayer 404 at ${relayerUrl}/relay/nickname`);
     throw new Error(j?.error || `Relayer nickname failed (HTTP ${res.status})`);
   }
 
   return j;
 }
 
-// Direct write optional (user pays gas) — keep your existing implementation if you have one
 export async function setNickname() {
   throw new Error("Direct nickname write not wired here.");
 }
