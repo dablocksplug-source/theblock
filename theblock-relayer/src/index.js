@@ -223,19 +223,7 @@ function sendJson(res, obj, status = 200) {
         .set("content-type", "application/json")
         .send(JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
 }
-const allow = new Set(["http://localhost:5173", "http://127.0.0.1:5173"]);
-if (UI_ORIGIN)
-    allow.add(UI_ORIGIN);
-app.use(cors({
-    origin: (origin, cb) => {
-        if (!origin)
-            return cb(null, true);
-        if (allow.has(origin))
-            return cb(null, true);
-        return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    methods: ["GET", "POST"],
-}));
+ 
 app.use(express.json({ limit: "256kb" }));
 // --------------------
 // tiny rate limit

@@ -1,0 +1,47 @@
+{
+  "roundName": "round1",
+  "snapshotFile": "rewards/snapshots/snapshot.round1.json",
+  "poolUsdc6": "50000000000",
+  "totalOzWei": "3979000000000000000000",
+  "claimWindowDays": 60,
+  "claimEnd": 1776177820,
+  "merkleRoot": "0xd6f0e4b89d80e0cb51311ccb9113cec8d31644210729e52173f3759e578141cd",
+  "claims": [
+    {
+      "wallet": "0x0332972028d900b788254f19549c2f94979a5f1f",
+      "eligibleOzWei": "864000000000000000000",
+      "payoutUsdc6": "10856999246",
+      "proof": [
+        "0x82e596c75c7cf3a0bb3ac06731dee3fe9dcb0c969b096e2f86357c99d54d915f",
+        "0x12697dedbe37bf83b0ea98f1864d5326cc7c3f1d2e0d079d2dbda8bad86393ea"
+      ]
+    },
+    {
+      "wallet": "0x5ca7541e7e7ea07dc0114d64090df3f39af5623c",
+      "eligibleOzWei": "1000000000000000000000",
+      "payoutUsdc6": "12565971350",
+      "proof": [
+        "0x796554cfd891f8a96abe20584f24740b8166e34bd833105c805d254fdc7d64fd",
+        "0x12697dedbe37bf83b0ea98f1864d5326cc7c3f1d2e0d079d2dbda8bad86393ea"
+      ]
+    },
+    {
+      "wallet": "0xa91d0b0c4e9bd587aee3cf61ada8ea0ea69b0093",
+      "eligibleOzWei": "1035000000000000000000",
+      "payoutUsdc6": "13005780347",
+      "proof": [
+        "0xe3e773e2aba71ea1d07b559bf845eee2bbfb7f3b97b2c585be73665e5fa563cc",
+        "0x044143abb79bbd8842bf6da9bebdc2bd2164e9e842ed1ce3b78a4826431bc048"
+      ]
+    },
+    {
+      "wallet": "0xb2b7438c699e5b2389a15094ebaf1640eb96caeb",
+      "eligibleOzWei": "1080000000000000000000",
+      "payoutUsdc6": "13571249057",
+      "proof": [
+        "0x8252123e472cd81d65172b41b60b90dbc46c29d8ce7e251aeb7ac4ea6c304fd2",
+        "0x044143abb79bbd8842bf6da9bebdc2bd2164e9e842ed1ce3b78a4826431bc048"
+      ]
+    }
+  ]
+}

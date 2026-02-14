@@ -1,3 +1,4 @@
+// src/index.ts
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -8,16 +9,10 @@ import {
   http,
   isAddress,
   hexToSignature,
-  encodeAbiParameters,
-  parseAbiParameters,
-  keccak256,
-  hashMessage,
-  recoverAddress,
   parseAbiItem,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
-
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 dotenv.config();
@@ -26,7 +21,8 @@ const ENV = process.env;
 // --------------------
 // env
 // --------------------
-const PORT = Number(ENV.PORT || 3000);
+// ✅ Fly expects internal_port=8787. If PORT is not injected, default to 8787 (NOT 3000).
+const PORT = Number(ENV.PORT || 8787);
 const CHAIN_ID = Number(ENV.CHAIN_ID || 84532);
 
 const RPC_URL = (ENV.RPC_URL || "").trim();
@@ -50,11 +46,15 @@ const SYNC_LOOKBACK_BLOCKS = Number(ENV.SYNC_LOOKBACK_BLOCKS || 4000);
 const FEED_LIMIT_DEFAULT = Number(ENV.FEED_LIMIT_DEFAULT || 15);
 const HOLDERS_LIMIT_DEFAULT = Number(ENV.HOLDERS_LIMIT_DEFAULT || 250);
 
-// ✅ provider-safe getLogs chunk (you set to 10 via fly secrets)
+// ✅ provider-safe getLogs chunk
 const LOGS_CHUNK_BLOCKS = BigInt(Number(ENV.LOGS_CHUNK_BLOCKS || 10));
 
 // ✅ request timeout knobs (ms)
 const SUPABASE_REQ_TIMEOUT_MS = Number(ENV.SUPABASE_REQ_TIMEOUT_MS || 7000);
+
+// ✅ sync-on-relay knobs (improves holders freshness)
+const SYNC_ON_RELAY = String(ENV.SYNC_ON_RELAY || "1") === "1";
+const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
@@ -119,6 +119,7 @@ const NICKNAME_MIN_ABI = [
 ] as const;
 
 const BLOCKSWAP_MIN_ABI = [
+  // ✅ legacy relayed buy
   {
     type: "function",
     name: "buyOzRelayed",
@@ -133,6 +134,8 @@ const BLOCKSWAP_MIN_ABI = [
     ],
     outputs: [],
   },
+
+  // ✅ permit flow
   {
     type: "function",
     name: "buyOzRelayedWithPermit",
@@ -200,20 +203,34 @@ function sendJson(res: any, obj: any, status = 200) {
     .send(JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
 }
 
-const allow = new Set<string>(["http://localhost:5173", "http://127.0.0.1:5173"]);
-if (UI_ORIGIN) allow.add(UI_ORIGIN);
+// --------------------
+// ✅ CORS
+// --------------------
+const allowlist = new Set<string>([
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://theblock.live",
+  "https://www.theblock.live",
+  "https://theblock.vercel.app",
+  "https://theblock-n2xy.vercel.app",
+]);
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (allow.has(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    methods: ["GET", "POST"],
-  })
-);
+if (UI_ORIGIN) allowlist.add(UI_ORIGIN);
 
+const corsOptions: cors.CorsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    if (allowlist.has(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "256kb" }));
 
 // --------------------
@@ -230,6 +247,19 @@ function hit(ip: string, limit: number, windowMs: number) {
   if (cur.n >= limit) return false;
   cur.n += 1;
   return true;
+}
+
+function getIp(req: express.Request) {
+  const xf = req.headers["x-forwarded-for"];
+  const s = (Array.isArray(xf) ? xf[0] : xf || "").toString();
+  // take first IP if list
+  const first = s.split(",")[0]?.trim();
+  return first || req.socket.remoteAddress || "unknown";
+}
+
+function zodMsg(e: any) {
+  if (e instanceof z.ZodError) return e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+  return String(e?.message || e);
 }
 
 // --------------------
@@ -255,6 +285,7 @@ const BuySchema = z.object({
   signature: z.string().startsWith("0x").optional(),
 });
 
+// ✅ buy-permit schema
 const BuyPermitSchema = z.object({
   user: z.string(),
   ozWei: z.union([z.string(), z.number(), z.bigint()]),
@@ -303,6 +334,33 @@ function normalizeV(v: number): number {
   return v;
 }
 
+/**
+ * ✅ KEY FIX: prevents scientific notation (1.08e+21) breaking BigInt
+ */
+function toIntStringSafe(v: any): string {
+  if (v == null) return "0";
+  if (typeof v === "bigint") return v.toString();
+
+  const s0 = String(v).trim();
+  if (!s0) return "0";
+  if (/^-?\d+$/.test(s0)) return s0;
+
+  const m = s0.match(/^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
+  if (!m) return s0;
+
+  const sign = m[1] || "";
+  const intPart = m[2] || "0";
+  const fracPart = m[3] || "";
+  const exp = parseInt(m[4], 10);
+
+  const digits = (intPart + fracPart).replace(/^0+/, "") || "0";
+  const fracLen = fracPart.length;
+  const shift = exp - fracLen;
+
+  if (shift >= 0) return sign + (digits + "0".repeat(shift));
+  return "0";
+}
+
 // parse v/r/s either from v+r+s OR from signature
 function parseSig(body: any, prefix?: "buy" | "permit") {
   const vKey = prefix ? `${prefix}V` : "v";
@@ -317,20 +375,20 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
 
     const r = body[rKey] as `0x${string}`;
     const s = body[sKey] as `0x${string}`;
-    if (typeof r !== "string" || !r.startsWith("0x") || r.length !== 66)
-      throw new Error(`Invalid ${rKey} (expected 32-byte hex)`);
-    if (typeof s !== "string" || !s.startsWith("0x") || s.length !== 66)
-      throw new Error(`Invalid ${sKey} (expected 32-byte hex)`);
+    if (typeof r !== "string" || !r.startsWith("0x") || r.length !== 66) throw new Error(`Invalid ${rKey}`);
+    if (typeof s !== "string" || !s.startsWith("0x") || s.length !== 66) throw new Error(`Invalid ${sKey}`);
     return { v: vNum, r, s };
   }
 
   if (body?.[sigKey]) {
-    const sig = hexToSignature(body[sigKey] as `0x${string}`);
+    const sigHex = body[sigKey] as `0x${string}`;
+    if (typeof sigHex !== "string" || !sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}`);
+    const sig = hexToSignature(sigHex);
     const vNum = normalizeV(Number(sig.v));
     return { v: vNum, r: sig.r, s: sig.s };
   }
 
-  throw new Error(`Missing ${prefix || ""} signature (provide v/r/s or ${sigKey})`);
+  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature`);
 }
 
 async function requireRelayerMatches() {
@@ -340,13 +398,11 @@ async function requireRelayerMatches() {
     functionName: "relayer",
   });
   if (String(onchainRelayer).toLowerCase() !== account.address.toLowerCase()) {
-    throw new Error(
-      `Relayer mismatch. Contract relayer=${onchainRelayer}, server wallet=${account.address}.`
-    );
+    throw new Error(`Relayer mismatch. Contract relayer=${onchainRelayer}, server wallet=${account.address}.`);
   }
 }
 
-// ✅ Promise/thenable timeout helper (works with supabase query builders too)
+// ✅ Promise/thenable timeout helper
 async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promise<T> {
   let t: any;
   const timeout = new Promise<never>((_, rej) => {
@@ -354,76 +410,10 @@ async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promi
   });
 
   try {
-    // Promise.resolve() will "assimilate" thenables (supabase builders)
     return await Promise.race([Promise.resolve(p), timeout]);
   } finally {
     clearTimeout(t);
   }
-}
-
-// ✅ EXACT hash scheme from your Solidity
-function blockswapBuyMsgHash(params: {
-  buyer: `0x${string}`;
-  ozWei: bigint;
-  nonce: bigint;
-  deadline: bigint;
-}): `0x${string}` {
-  const typeHash = keccak256(
-    encodeAbiParameters(parseAbiParameters("string"), ["BLOCKSWAP_BUY_OZ"])
-  );
-
-  return keccak256(
-    encodeAbiParameters(
-      parseAbiParameters("bytes32,address,uint256,uint256,uint256,address,uint256"),
-      [
-        typeHash,
-        params.buyer,
-        params.ozWei,
-        params.nonce,
-        params.deadline,
-        BLOCKSWAP_ADDRESS,
-        BigInt(CHAIN_ID),
-      ]
-    )
-  );
-}
-
-async function recoverBuyerFromBuySignature(params: {
-  buyer: `0x${string}`;
-  ozWei: bigint;
-  deadline: bigint;
-  signature: `0x${string}`;
-}): Promise<{
-  nonce: bigint;
-  msgHash: `0x${string}`;
-  ethSignedHash: `0x${string}`;
-  recovered: `0x${string}` | null;
-  matches: boolean;
-}> {
-  const nonce = await publicClient.readContract({
-    address: BLOCKSWAP_ADDRESS,
-    abi: BLOCKSWAP_MIN_ABI,
-    functionName: "nonces",
-    args: [params.buyer],
-  });
-
-  const msgHash = blockswapBuyMsgHash({
-    buyer: params.buyer,
-    ozWei: params.ozWei,
-    nonce,
-    deadline: params.deadline,
-  });
-
-  const ethSignedHash = hashMessage({ raw: msgHash });
-
-  const recovered = await recoverAddress({
-    hash: ethSignedHash,
-    signature: params.signature,
-  }).catch(() => null);
-
-  const matches = !!recovered && recovered.toLowerCase() === params.buyer.toLowerCase();
-
-  return { nonce, msgHash, ethSignedHash, recovered, matches };
 }
 
 // --------------------
@@ -432,17 +422,21 @@ async function recoverBuyerFromBuySignature(params: {
 async function supaInsertEvent(row: any) {
   if (!supabase) return;
   try {
+    const fixed = {
+      ...row,
+      oz_wei: toIntStringSafe(row.oz_wei),
+      usdc_6: toIntStringSafe(row.usdc_6),
+    };
+
     const { error } = await withTimeout<any>(
-  supabase.from("blockswap_events").insert(row),
-  SUPABASE_REQ_TIMEOUT_MS,
-  "supabase_timeout"
-);
+      supabase.from("blockswap_events").insert(fixed),
+      SUPABASE_REQ_TIMEOUT_MS,
+      "supabase_timeout"
+    );
 
     if (error) {
       const msg = String((error as any).message || "");
-      if (!msg.toLowerCase().includes("duplicate")) {
-        console.warn("[supa] insert event error:", (error as any).message);
-      }
+      if (!msg.toLowerCase().includes("duplicate")) console.warn("[supa] insert event error:", (error as any).message);
     }
   } catch (e: any) {
     console.warn("[supa] insert event exception:", e?.message || e);
@@ -458,44 +452,44 @@ async function supaUpsertHolderDelta(params: { wallet: string; ozWeiDelta: bigin
 
   try {
     const { data: cur, error: readErr } = await withTimeout<any>(
-  supabase
-    .from("blockswap_holders")
-    .select("oz_wei")
-    .eq("chain_id", CHAIN_ID)
-    .eq("contract", lower(BLOCKSWAP_ADDRESS))
-    .eq("wallet", wallet)
-    .maybeSingle(),
-  SUPABASE_REQ_TIMEOUT_MS,
-  "supabase_timeout"
-);
-
+      supabase
+        .from("blockswap_holders")
+        .select("oz_wei")
+        .eq("chain_id", CHAIN_ID)
+        .eq("contract", lower(BLOCKSWAP_ADDRESS))
+        .eq("wallet", wallet)
+        .maybeSingle(),
+      SUPABASE_REQ_TIMEOUT_MS,
+      "supabase_timeout"
+    );
 
     if (readErr) {
       console.warn("[supa] holders read error:", (readErr as any).message);
       return;
     }
 
-    const curOz = (cur as any)?.oz_wei ? BigInt(String((cur as any).oz_wei)) : 0n;
+    const curRaw = (cur as any)?.oz_wei;
+    const curOz = curRaw != null ? BigInt(toIntStringSafe(curRaw)) : 0n;
+
     let next = curOz + delta;
     if (next < 0n) next = 0n;
 
-   const { error: upErr } = await withTimeout<any>(
-  supabase
-    .from("blockswap_holders")
-    .upsert(
-      {
-        chain_id: CHAIN_ID,
-        contract: lower(BLOCKSWAP_ADDRESS),
-        wallet,
-        oz_wei: next.toString(),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "chain_id,contract,wallet" }
-    ),
-  SUPABASE_REQ_TIMEOUT_MS,
-  "supabase_timeout"
-);
-
+    const { error: upErr } = await withTimeout<any>(
+      supabase
+        .from("blockswap_holders")
+        .upsert(
+          {
+            chain_id: CHAIN_ID,
+            contract: lower(BLOCKSWAP_ADDRESS),
+            wallet,
+            oz_wei: next.toString(),
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "chain_id,contract,wallet" }
+        ),
+      SUPABASE_REQ_TIMEOUT_MS,
+      "supabase_timeout"
+    );
 
     if (upErr) console.warn("[supa] holders upsert error:", (upErr as any).message);
   } catch (e: any) {
@@ -506,14 +500,20 @@ async function supaUpsertHolderDelta(params: { wallet: string; ozWeiDelta: bigin
 // --------------------
 // Chain sync (getLogs -> Supabase)
 // --------------------
-let __syncRunning = false;
+let __syncInFlight = false;
 let __lastSyncedToBlock = 0n;
+let __syncLastRunAt: string | null = null;
+let __syncLastOkAt: string | null = null;
+let __syncLastError: string | null = null;
 
 async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
   if (!supabase) return { ok: false, skipped: true, reason: "supabase_not_configured" };
-  if (__syncRunning) return { ok: false, skipped: true, reason: "sync_already_running" };
+  if (__syncInFlight) return { ok: false, skipped: true, reason: "sync_already_running" };
 
-  __syncRunning = true;
+  __syncInFlight = true;
+  __syncLastRunAt = new Date().toISOString();
+  __syncLastError = null;
+
   try {
     const latest = await logsClient.getBlockNumber();
     const lb = BigInt(Math.max(1, Math.min(lookbackBlocks || 1, 200_000)));
@@ -524,8 +524,6 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
     if (fromBlock < 1n) fromBlock = 1n;
 
     const toBlock = latest;
-
-    // ✅ provider-safe chunk
     const CHUNK = LOGS_CHUNK_BLOCKS > 0n ? LOGS_CHUNK_BLOCKS : 10n;
 
     let cursor = fromBlock;
@@ -536,18 +534,8 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
       const end = cursor + CHUNK - 1n <= toBlock ? cursor + CHUNK - 1n : toBlock;
 
       const [bought, sold] = await Promise.all([
-        logsClient.getLogs({
-          address: BLOCKSWAP_ADDRESS,
-          event: EVT_BOUGHT,
-          fromBlock: cursor,
-          toBlock: end,
-        }),
-        logsClient.getLogs({
-          address: BLOCKSWAP_ADDRESS,
-          event: EVT_SOLD,
-          fromBlock: cursor,
-          toBlock: end,
-        }),
+        logsClient.getLogs({ address: BLOCKSWAP_ADDRESS, event: EVT_BOUGHT, fromBlock: cursor, toBlock: end }),
+        logsClient.getLogs({ address: BLOCKSWAP_ADDRESS, event: EVT_SOLD, fromBlock: cursor, toBlock: end }),
       ]);
 
       for (const l of bought || []) {
@@ -555,7 +543,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
         const ozWei = BigInt((l as any).args?.ozWei ?? 0n);
         const usdcTotal = BigInt((l as any).args?.usdcTotal ?? 0n);
 
-        const row = {
+        await supaInsertEvent({
           chain_id: CHAIN_ID,
           contract: lower(BLOCKSWAP_ADDRESS),
           event_type: "BUY",
@@ -566,9 +554,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
           tx_hash: String((l as any).transactionHash || ""),
           log_index: Number((l as any).logIndex ?? 0),
           created_at: new Date().toISOString(),
-        };
-
-        await supaInsertEvent(row);
+        });
         inserted += 1;
 
         await supaUpsertHolderDelta({ wallet: buyer, ozWeiDelta: ozWei });
@@ -580,7 +566,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
         const ozWei = BigInt((l as any).args?.ozWei ?? 0n);
         const usdcPaid = BigInt((l as any).args?.usdcPaid ?? 0n);
 
-        const row = {
+        await supaInsertEvent({
           chain_id: CHAIN_ID,
           contract: lower(BLOCKSWAP_ADDRESS),
           event_type: "SELLBACK",
@@ -591,9 +577,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
           tx_hash: String((l as any).transactionHash || ""),
           log_index: Number((l as any).logIndex ?? 0),
           created_at: new Date().toISOString(),
-        };
-
-        await supaInsertEvent(row);
+        });
         inserted += 1;
 
         await supaUpsertHolderDelta({ wallet: seller, ozWeiDelta: -ozWei });
@@ -604,6 +588,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
     }
 
     __lastSyncedToBlock = toBlock;
+    __syncLastOkAt = new Date().toISOString();
 
     return {
       ok: true,
@@ -615,17 +600,14 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
       chunkBlocks: CHUNK.toString(),
     };
   } catch (e: any) {
-    console.warn("[sync] failed:", e?.shortMessage || e?.message || e);
-    return { ok: false, error: e?.shortMessage || e?.message || "sync_failed" };
+    const msg = e?.shortMessage || e?.message || "sync_failed";
+    __syncLastError = String(msg);
+    console.warn("[sync] failed:", msg);
+    return { ok: false, error: String(msg) };
   } finally {
-    __syncRunning = false;
+    __syncInFlight = false;
   }
 }
-
-// --------------------
-// last request capture
-// --------------------
-let lastReq: any = null;
 
 // --------------------
 // routes
@@ -645,8 +627,7 @@ app.get("/health", async (_req, res) => {
       abi: BLOCKSWAP_MIN_ABI,
       functionName: "relayer",
     });
-    relayerMatches =
-      !!relayerOnchain && relayerOnchain.toLowerCase() === account.address.toLowerCase();
+    relayerMatches = !!relayerOnchain && relayerOnchain.toLowerCase() === account.address.toLowerCase();
   } catch {}
 
   try {
@@ -674,44 +655,18 @@ app.get("/health", async (_req, res) => {
       everyMs: SYNC_EVERY_MS,
       lookbackBlocks: SYNC_LOOKBACK_BLOCKS,
       lastSyncedToBlock: __lastSyncedToBlock ? __lastSyncedToBlock.toString() : "0",
-      running: __syncRunning,
+      inFlight: __syncInFlight,
+      lastRunAt: __syncLastRunAt,
+      lastOkAt: __syncLastOkAt,
+      lastError: __syncLastError,
       logsChunkBlocks: LOGS_CHUNK_BLOCKS.toString(),
+      syncOnRelay: SYNC_ON_RELAY,
+      syncOnRelayDelayMs: SYNC_ON_RELAY_DELAY_MS,
     },
   });
 });
 
-// ✅ Supabase connectivity from Fly WITH HEADERS
-app.get("/debug/supa-ping", async (_req, res) => {
-  try {
-    if (!SUPABASE_URL) return sendJson(res, { ok: false, error: "missing_SUPABASE_URL" }, 400);
-    if (!SUPABASE_SERVICE_ROLE_KEY)
-      return sendJson(res, { ok: false, error: "missing_SUPABASE_SERVICE_ROLE_KEY" }, 400);
-
-    const r = await withTimeout(
-      fetch(`${SUPABASE_URL}/auth/v1/health`, {
-        method: "GET",
-        headers: {
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        },
-      }),
-      7000,
-      "supabase_timeout"
-    );
-
-    const text = await r.text();
-    return sendJson(res, { ok: true, status: r.status, body: text.slice(0, 300) });
-  } catch (e: any) {
-    const msg = String(e?.message || e);
-    return sendJson(res, { ok: false, error: msg }, 400);
-  }
-});
-
-app.get("/debug/last", (_req, res) => sendJson(res, { ok: true, last: lastReq }));
-
-// --------------------
 // FEED endpoints
-// --------------------
 app.get("/feed/activity", async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit || FEED_LIMIT_DEFAULT)));
@@ -726,9 +681,15 @@ app.get("/feed/activity", async (req, res) => {
       .order("created_at", { ascending: false })
       .limit(limit);
 
-    const { data, error } = await withTimeout<any>(p, SUPABASE_REQ_TIMEOUT_MS, "supabase_timeout");
+    const { data } = await withTimeout<any>(p, SUPABASE_REQ_TIMEOUT_MS, "supabase_timeout");
 
-    return sendJson(res, { ok: true, rows: data || [] });
+    const rows = (data || []).map((r: any) => ({
+      ...r,
+      oz_wei: toIntStringSafe(r.oz_wei),
+      usdc_6: toIntStringSafe(r.usdc_6),
+    }));
+
+    return sendJson(res, { ok: true, rows });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (msg === "supabase_timeout") return sendJson(res, { ok: false, error: "supabase_timeout" }, 400);
@@ -749,10 +710,14 @@ app.get("/feed/holders", async (req, res) => {
       .order("oz_wei", { ascending: false })
       .limit(limit);
 
-    const { data, error } = await withTimeout<any>(p, SUPABASE_REQ_TIMEOUT_MS, "supabase_timeout");
+    const { data } = await withTimeout<any>(p, SUPABASE_REQ_TIMEOUT_MS, "supabase_timeout");
 
+    const rows = (data || []).map((r: any) => ({
+      ...r,
+      oz_wei: toIntStringSafe(r.oz_wei),
+    }));
 
-    return sendJson(res, { ok: true, rows: data || [] });
+    return sendJson(res, { ok: true, rows });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (msg === "supabase_timeout") return sendJson(res, { ok: false, error: "supabase_timeout" }, 400);
@@ -760,15 +725,11 @@ app.get("/feed/holders", async (req, res) => {
   }
 });
 
-// Manual sync trigger
-app.post("/admin/sync", async (req, res) => {
+// ✅ Manual sync trigger (prevents 404)
+app.post("/admin/sync-now", async (_req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.toString() || req.socket.remoteAddress || "unknown";
-    if (!hit(ip, 10, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
-
-    const lookback = Number(req.body?.lookbackBlocks || SYNC_LOOKBACK_BLOCKS);
-    const r = await syncFromChain({ lookbackBlocks: lookback });
+    if (!ENABLE_CHAIN_SYNC) return sendJson(res, { ok: false, error: "sync_disabled" }, 400);
+    const r = await syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS });
     return sendJson(res, r, r.ok ? 200 : 400);
   } catch (e: any) {
     return sendJson(res, { ok: false, error: e?.message || "sync failed" }, 400);
@@ -780,8 +741,7 @@ app.post("/admin/sync", async (req, res) => {
 // --------------------
 app.post("/relay/nickname", async (req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.toString() || req.socket.remoteAddress || "unknown";
+    const ip = getIp(req);
     if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     if (!NICKNAME_REGISTRY_ADDRESS || !isAddress(NICKNAME_REGISTRY_ADDRESS)) {
@@ -806,14 +766,13 @@ app.post("/relay/nickname", async (req, res) => {
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: e?.message || "Relay nickname failed" }, 400);
+    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay nickname failed" }, 400);
   }
 });
 
 app.post("/relay/buy", async (req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.toString() || req.socket.remoteAddress || "unknown";
+    const ip = getIp(req);
     if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const body = BuySchema.parse(req.body);
@@ -822,6 +781,8 @@ app.post("/relay/buy", async (req, res) => {
     const ozWei = mustUint(body.ozWei, "ozWei");
     const deadline = mustUintSeconds(body.deadline, "deadline");
     if (deadline < nowSec()) throw new Error("Expired deadline");
+
+    await requireRelayerMatches();
 
     const { v, r, s } = parseSig(body);
 
@@ -832,23 +793,22 @@ app.post("/relay/buy", async (req, res) => {
       args: [user, ozWei, deadline, v, r, s],
     });
 
-    if (ENABLE_CHAIN_SYNC && hasSupabase()) {
-      setTimeout(() => syncFromChain({ lookbackBlocks: 800 }).catch(() => {}), 2500);
+    if (hasSupabase()) supaUpsertHolderDelta({ wallet: user, ozWeiDelta: ozWei }).catch(() => {});
+    if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
+      setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(res, { ok: false, error: e?.message || "Relay buy failed" }, 400);
+    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay buy failed" }, 400);
   }
 });
 
+// ✅ buy-permit route
 app.post("/relay/buy-permit", async (req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.toString() || req.socket.remoteAddress || "unknown";
+    const ip = getIp(req);
     if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
-
-    lastReq = { at: new Date().toISOString(), endpoint: "/relay/buy-permit", body: req.body };
 
     const body = BuyPermitSchema.parse(req.body);
 
@@ -860,8 +820,8 @@ app.post("/relay/buy-permit", async (req, res) => {
     const permitValue = mustUint(body.permitValue, "permitValue");
 
     const now = nowSec();
-    if (buyDeadline < now) throw new Error(`Expired buyDeadline (now=${now.toString()})`);
-    if (permitDeadline < now) throw new Error(`Expired permitDeadline (now=${now.toString()})`);
+    if (buyDeadline < now) throw new Error("Expired buyDeadline");
+    if (permitDeadline < now) throw new Error("Expired permitDeadline");
 
     await requireRelayerMatches();
 
@@ -880,17 +840,14 @@ app.post("/relay/buy-permit", async (req, res) => {
       ],
     });
 
-    if (ENABLE_CHAIN_SYNC && hasSupabase()) {
-      setTimeout(() => syncFromChain({ lookbackBlocks: 800 }).catch(() => {}), 2500);
+    if (hasSupabase()) supaUpsertHolderDelta({ wallet: user, ozWeiDelta: ozWei }).catch(() => {});
+    if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
+      setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
 
     return sendJson(res, { ok: true, hash });
   } catch (e: any) {
-    return sendJson(
-      res,
-      { ok: false, error: e?.shortMessage || e?.message || "Relay buy-permit failed" },
-      400
-    );
+    return sendJson(res, { ok: false, error: zodMsg(e) || "Relay buy-permit failed" }, 400);
   }
 });
 
@@ -902,20 +859,15 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`ChainId (env): ${CHAIN_ID}`);
   console.log(`Relayer wallet: ${account.address}`);
   console.log(`BlockSwap: ${BLOCKSWAP_ADDRESS}`);
-  console.log(`UI_ORIGIN allowlist: ${Array.from(allow).join(", ")}`);
+  console.log(`CORS allowlist: ${Array.from(allowlist).join(", ")}`);
   console.log(`Supabase: ${hasSupabase() ? "ON" : "OFF"}`);
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
     console.log(`[sync] ENABLED every ${SYNC_EVERY_MS}ms, lookback=${SYNC_LOOKBACK_BLOCKS} blocks`);
-    setTimeout(() => {
-      syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {});
-    }, 1500);
-
-    setInterval(() => {
-      syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {});
-    }, SYNC_EVERY_MS);
+    setTimeout(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), 1500);
+    setInterval(() => syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS }).catch(() => {}), SYNC_EVERY_MS);
   } else {
     console.log(
       `[sync] DISABLED (ENABLE_CHAIN_SYNC=${ENABLE_CHAIN_SYNC ? "1" : "0"}, supabase=${hasSupabase() ? "ON" : "OFF"})`

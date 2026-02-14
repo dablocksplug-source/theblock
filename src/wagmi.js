@@ -6,6 +6,11 @@ import { metaMask, coinbaseWallet, walletConnect } from "wagmi/connectors";
 const WALLETCONNECT_PROJECT_ID =
   import.meta.env.VITE_WC_PROJECT_ID || "";
 
+// Helps WalletConnect identify your app properly
+const APP_URL =
+  import.meta.env.VITE_APP_URL ||
+  (typeof window !== "undefined" ? window.location.origin : "http://localhost");
+
 // Decide chain from env
 const chain =
   Number(import.meta.env.VITE_CHAIN_ID || 84532) === base.id
@@ -17,6 +22,7 @@ export const wagmiConfig = createConfig({
 
   connectors: [
     metaMask(),
+
     coinbaseWallet({
       appName: "The Block",
     }),
@@ -25,6 +31,16 @@ export const wagmiConfig = createConfig({
       ? [
           walletConnect({
             projectId: WALLETCONNECT_PROJECT_ID,
+            showQrModal: true,
+
+            metadata: {
+              name: "The Block",
+              description: "BlockSwap + Rewards",
+              url: APP_URL,
+              icons: [
+                `${APP_URL}/icons/icon-512.png`, // change later if needed
+              ],
+            },
           }),
         ]
       : []),

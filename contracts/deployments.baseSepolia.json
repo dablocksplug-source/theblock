@@ -6,7 +6,8 @@
   "contracts": {
     "MockUSDC": "0xbefe908a855ef8a5cde63c0e1729fac443035837",
     "OZToken": "0xab48da141b44aeb9bc5dc3cb0ff2982f1c615830",
-    "BlockSwap": "0xa69111d06b627c2871ad4ad9351223dac2c2e39c"
+    "BlockSwap": "0xa69111d06b627c2871ad4ad9351223dac2c2e39c",
+    "BlockRewardsMerkle": "0x119ae679658ae85e74c5b4cec3cae89a5455b30f"
   },
   "params": {
     "reserve": "0x49d118023e6bCeB0E7c4e5b7925637563A0b9805",

@@ -4,15 +4,16 @@
 
 const ENV = import.meta.env || {};
 
-// Put this in UI ROOT: theblock-ui/.env.local
-// VITE_BASE_SEPOLIA_RPC=https://base-sepolia.g.alchemy.com/v2/KEY
-const RPC_FROM_ENV = ENV.VITE_BASE_SEPOLIA_RPC || ENV.VITE_RPC_URL || "";
+const RPC_FROM_ENV = (ENV.VITE_BASE_SEPOLIA_RPC || ENV.VITE_RPC_URL || "").trim();
 
 function mustRpc() {
   if (!RPC_FROM_ENV) {
-    console.warn(
-      "[BlockSwap] Missing RPC URL. Set VITE_BASE_SEPOLIA_RPC in theblock-ui/.env.local and restart `npm run dev`."
-    );
+    // Warn in dev only (keep prod console clean)
+    if (ENV.MODE !== "production") {
+      console.warn(
+        "[BlockSwap] Missing RPC URL. Set VITE_BASE_SEPOLIA_RPC (or VITE_RPC_URL) in theblock-ui/.env.local and restart `npm run dev`."
+      );
+    }
   }
   return RPC_FROM_ENV;
 }
@@ -36,7 +37,7 @@ export const BLOCKSWAP_CONFIG = {
   STARTING_TREASURY: 0,
 
   STARTING_PHASE: 1,
-  BRICK_POOL_BY_PHASE: { 1: 0.30, 2: 0.35, 3: 0.40 },
+  BRICK_POOL_BY_PHASE: { 1: 0.3, 2: 0.35, 3: 0.4 },
 
   ADMIN_WALLET: "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
 
@@ -57,5 +58,12 @@ export const BLOCKSWAP_CONFIG = {
   USDC_ADDRESS: ENV.VITE_USDC_ADDRESS || "0x0000000000000000000000000000000000000000",
   OZ_ADDRESS: ENV.VITE_OZ_ADDRESS || "0x0000000000000000000000000000000000000000",
   BLOCKSWAP_ADDRESS: ENV.VITE_BLOCKSWAP_ADDRESS || "0x0000000000000000000000000000000000000000",
-  REWARDS_ADDRESS: ENV.VITE_REWARDS_ADDRESS || "0x0000000000000000000000000000000000000000",
+
+  // Rewards (Merkle)
+  REWARDS_ADDRESS:
+    ENV.VITE_REWARDS_ADDRESS ||
+    ENV.VITE_REWARDS_MERKLE_ADDRESS ||
+    "0x0000000000000000000000000000000000000000",
+  REWARDS_ROUND_ID: Number(ENV.VITE_REWARDS_ROUND_ID || 1),
+  REWARDS_PROOFS_URL: ENV.VITE_REWARDS_PROOFS_URL || "/rewards/round1.proofs.json",
 };

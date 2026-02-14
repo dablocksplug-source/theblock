@@ -17,7 +17,6 @@ import {
   toHex,
   decodeEventLog,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 
 import { createClient } from "@supabase/supabase-js";
@@ -29,9 +28,27 @@ import BlockRewardsMerkle from "../abi/BlockRewardsMerkle.json"; // eslint-disab
 // ---------- ERC20 minimal ----------
 const ERC20_MIN_ABI = [
   { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
-  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
-  { type: "function", name: "allowance", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }] },
-  { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] },
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [{ type: "address" }, { type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [{ type: "address" }, { type: "uint256" }],
+    outputs: [{ type: "bool" }],
+  },
 ];
 
 // ---------- ERC20Permit minimal ----------
@@ -82,8 +99,7 @@ let __labels = {}; // { [addrLower]: "Nick" }
 
 // deployments loader
 let __deploymentsCache = { atMs: 0, data: null };
-const DEPLOYMENTS_URL =
-  Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+const DEPLOYMENTS_URL = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
 
 // -------------------------------
 // DEBUG SWITCH
@@ -130,10 +146,30 @@ function resolveRelayerUrl() {
 function relayerOk() {
   return !!resolveRelayerUrl();
 }
-async function fetchJson(url) {
-  const res = await fetch(url, { method: "GET" });
-  const j = await res.json().catch(() => null);
-  return { res, j };
+
+async function fetchJson(url, { method = "GET", body, timeoutMs = 15_000, noStore = true } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: body ? { "content-type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      cache: noStore ? "no-store" : "default",
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text();
+    let j = null;
+    try {
+      j = text ? JSON.parse(text) : null;
+    } catch {
+      j = null;
+    }
+    return { res, j, text };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // -------- knobs --------
@@ -255,7 +291,7 @@ async function safeRead(promise, fallback, label) {
   } catch (e) {
     if (label && !__warnedLabels.has(label)) {
       __warnedLabels.add(label);
-      console.warn(`[safeRead] ${label} failed:`, e?.shortMessage || e?.message || e);
+      if (DEBUG_LOGS) console.warn(`[safeRead] ${label} failed:`, e?.shortMessage || e?.message || e);
     }
     return fallback;
   }
@@ -280,10 +316,7 @@ function resolveRpcUrl() {
 }
 
 function resolveLogsRpcUrl() {
-  const logs =
-    sanitizeUrl(import.meta.env.VITE_RPC_URL_LOGS) ||
-    sanitizeUrl(import.meta.env.VITE_LOGS_RPC_URL);
-
+  const logs = sanitizeUrl(import.meta.env.VITE_RPC_URL_LOGS) || sanitizeUrl(import.meta.env.VITE_LOGS_RPC_URL);
   if (!logs || looksLikeAlchemyMissingKey(logs)) return resolveRpcUrl();
   return logs;
 }
@@ -354,53 +387,60 @@ function toBlockHex(n) {
 
 let __lastRpcFailSig = "";
 
-async function rpcPost(url, payload, dbgLabel = "") {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await res.text();
-
-  let json = null;
+async function rpcPost(url, payload, dbgLabel = "", { timeoutMs = 20_000 } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    json = JSON.parse(text);
-  } catch {}
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
 
-  if (!res.ok) {
-    const sig = `${res.status}|${payload?.method}|${payload?.params?.[0]?.address || ""}|${payload?.params?.[0]?.fromBlock || ""}|${payload?.params?.[0]?.toBlock || ""}`;
-    if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
-      __lastRpcFailSig = sig;
-      console.error("[BlockSwap][RPC HTTP FAIL]", {
-        status: res.status,
-        dbgLabel,
-        url,
-        payload,
-        responsePreview: String(text || "").slice(0, 500),
-      });
+    const text = await res.text();
+
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {}
+
+    if (!res.ok) {
+      const sig = `${res.status}|${payload?.method}|${payload?.params?.[0]?.address || ""}|${payload?.params?.[0]?.fromBlock || ""}|${payload?.params?.[0]?.toBlock || ""}`;
+      if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
+        __lastRpcFailSig = sig;
+        console.error("[BlockSwap][RPC HTTP FAIL]", {
+          status: res.status,
+          dbgLabel,
+          url,
+          payload,
+          responsePreview: String(text || "").slice(0, 500),
+        });
+      }
+
+      const msg = json?.error?.message || String(text || "").slice(0, 180) || `HTTP ${res.status}`;
+      const err = new Error(msg);
+      err.status = res.status;
+      err.raw = text;
+      throw err;
     }
 
-    const msg = json?.error?.message || String(text || "").slice(0, 180) || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.raw = text;
-    throw err;
-  }
-
-  if (json?.error) {
-    const sig = `jsonerr|${payload?.method}|${json?.error?.code || ""}`;
-    if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
-      __lastRpcFailSig = sig;
-      console.error("[BlockSwap][RPC JSON ERROR]", { dbgLabel, url, payload, error: json.error });
+    if (json?.error) {
+      const sig = `jsonerr|${payload?.method}|${json?.error?.code || ""}`;
+      if (DEBUG_LOGS && sig !== __lastRpcFailSig) {
+        __lastRpcFailSig = sig;
+        console.error("[BlockSwap][RPC JSON ERROR]", { dbgLabel, url, payload, error: json.error });
+      }
+      const err = new Error(json.error.message || "RPC error");
+      err.code = json.error.code;
+      err.data = json.error.data;
+      throw err;
     }
-    const err = new Error(json.error.message || "RPC error");
-    err.code = json.error.code;
-    err.data = json.error.data;
-    throw err;
-  }
 
-  return json?.result;
+    return json?.result;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function getLogsRaw({ rpcUrl, address, fromBlock, toBlock, topic0 }) {
@@ -423,20 +463,7 @@ async function getLogsRaw({ rpcUrl, address, fromBlock, toBlock, topic0 }) {
 
 async function getLogsChunkedSafe(
   pc,
-  {
-    address,
-    event,
-    fromBlock,
-    toBlock,
-    label,
-    chunkSize = 900n,
-    maxChunks = 12,
-    maxLogs = 400,
-    force = false,
-    rpcUrl = "",
-    topic0 = "",
-    decodeEvent = null,
-  }
+  { address, event, fromBlock, toBlock, label, chunkSize = 900n, maxChunks = 12, maxLogs = 400, force = false, rpcUrl = "", topic0 = "", decodeEvent = null }
 ) {
   if (!force && nowMs() < __logsCooldownUntil) return [];
 
@@ -471,7 +498,7 @@ async function getLogsChunkedSafe(
 
       if (label && !__warnedLabels.has(label)) {
         __warnedLabels.add(label);
-        console.warn(`[logs] ${label} failed:`, msg);
+        if (DEBUG_LOGS) console.warn(`[logs] ${label} failed:`, msg);
       }
       if (isLogsFailure(e)) bumpLogsCooldown();
 
@@ -483,22 +510,12 @@ async function getLogsChunkedSafe(
             console.warn("[logs] switching to RAW eth_getLogs fallback for:", label);
           }
 
-          const raw = await getLogsRaw({
-            rpcUrl,
-            address,
-            fromBlock: cursor,
-            toBlock: end,
-            topic0,
-          });
+          const raw = await getLogsRaw({ rpcUrl, address, fromBlock: cursor, toBlock: end, topic0 });
 
           if (Array.isArray(raw) && raw.length) {
             for (const r of raw) {
               try {
-                const decoded = decodeEventLog({
-                  abi: [decodeEvent],
-                  data: r.data,
-                  topics: r.topics,
-                });
+                const decoded = decodeEventLog({ abi: [decodeEvent], data: r.data, topics: r.topics });
 
                 out.push({
                   args: decoded.args,
@@ -601,7 +618,7 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 async function getPermitDomain({ pc, usdc, chainId }) {
   const name = await safeRead(
     pc.readContract({ address: usdc, abi: ERC20_PERMIT_ABI, functionName: "name" }),
-    "Mock USDC",
+    "USDC",
     "USDC.name"
   );
 
@@ -661,7 +678,8 @@ export const blockswapAdapter = {
     const rpc = resolveRpcUrl();
     const logsRpc = resolveLogsRpcUrl();
 
-    if (!__rpcLogged) {
+    // ✅ ONLY log sensitive RPC info when DEBUG_LOGS=1
+    if (DEBUG_LOGS && !__rpcLogged) {
       __rpcLogged = true;
       console.log("[BlockSwap] RPC:", rpc);
       console.log("[BlockSwap] Logs RPC:", logsRpc);
@@ -671,7 +689,6 @@ export const blockswapAdapter = {
       if (looksLikeAlchemyMissingKey(import.meta.env.VITE_RPC_URL_LOGS)) {
         console.warn("[BlockSwap] VITE_RPC_URL_LOGS looks like missing an Alchemy key; reusing VITE_RPC_URL.");
       }
-      if (DEBUG_LOGS) console.warn("[BlockSwap] DEBUG_LOGS is ON (VITE_DEBUG_LOGS=1).");
     }
 
     if (__pcCache.client && __pcCache.rpc === rpc && __pcCache.chainId === Number(C.CHAIN_ID)) {
@@ -730,29 +747,11 @@ export const blockswapAdapter = {
     const { SWAP, USDC, OZ } = await resolveAddresses();
     const pc = this._publicClient();
 
-    const sellPricePerBrick = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "sellPricePerBrick",
-    });
+    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
+    const buybackFloorPerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buybackFloorPerBrick" });
+    const buyPaused = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buyPaused" });
 
-    const buybackFloorPerBrick = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "buybackFloorPerBrick",
-    });
-
-    const buyPaused = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "buyPaused",
-    });
-
-    const floorLiabilityUSDC = await safeRead(
-      pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "floorLiabilityUSDC" }),
-      0n,
-      "floorLiabilityUSDC"
-    );
+    const floorLiabilityUSDC = await safeRead(pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "floorLiabilityUSDC" }), 0n, "floorLiabilityUSDC");
 
     const treasuryAddr = await safeRead(
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "theBlockTreasury" }),
@@ -760,20 +759,10 @@ export const blockswapAdapter = {
       "theBlockTreasury"
     );
 
-    const swapOzBal = await safeRead(
-      pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
-      0n,
-      "OZ.balanceOf(SWAP)"
-    );
+    const swapOzBal = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP)");
+    const swapUsdcBal = await safeRead(pc.readContract({ address: USDC, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "USDC.balanceOf(SWAP)");
 
-    const swapUsdcBal = await safeRead(
-      pc.readContract({ address: USDC, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
-      0n,
-      "USDC.balanceOf(SWAP)"
-    );
-
-    const treasuryAddrIsZero =
-      !treasuryAddr || String(treasuryAddr).toLowerCase() === "0x0000000000000000000000000000000000000000";
+    const treasuryAddrIsZero = !treasuryAddr || String(treasuryAddr).toLowerCase() === "0x0000000000000000000000000000000000000000";
 
     const treasuryUsdcBal = await safeRead(
       !treasuryAddrIsZero
@@ -849,7 +838,7 @@ export const blockswapAdapter = {
     if (relayerOk()) {
       const baseUrl = resolveRelayerUrl().replace(/\/+$/, "");
       try {
-        const { res, j } = await fetchJson(`${baseUrl}/feed/activity?limit=${encodeURIComponent(take)}`);
+        const { res, j } = await fetchJson(`${baseUrl}/feed/activity?limit=${encodeURIComponent(take)}`, { timeoutMs: 15_000 });
         if (res.ok && j?.ok && Array.isArray(j.rows)) {
           const stable = C.STABLE_SYMBOL || "USDC";
           const data = j.rows.map((r) => {
@@ -884,14 +873,12 @@ export const blockswapAdapter = {
           return data;
         }
       } catch (e) {
-        console.warn("[relayer feed] activity failed:", e?.message || e);
+        if (DEBUG_LOGS) console.warn("[relayer feed] activity failed:", e?.message || e);
       }
     }
 
-    // 2) Supabase (optional) — if you ever add matching tables/views later
+    // 2) Supabase (optional)
     if (supaOk()) {
-      // If your Supabase schema doesn't match, you'll just get [] here.
-      // Keeping it as a fallback, but relayer is the recommended source.
       try {
         const { data, error } = await supabase
           .from("blockswap_events")
@@ -1029,7 +1016,7 @@ export const blockswapAdapter = {
       __activityCache = { atMs: nowMs(), key, data };
       return data;
     } catch (e) {
-      console.warn("[activity] failed:", e?.shortMessage || e?.message || e);
+      if (DEBUG_LOGS) console.warn("[activity] failed:", e?.shortMessage || e?.message || e);
       if (isLogsFailure(e)) bumpLogsCooldown();
       return [];
     }
@@ -1047,7 +1034,7 @@ export const blockswapAdapter = {
     if (relayerOk()) {
       const baseUrl = resolveRelayerUrl().replace(/\/+$/, "");
       try {
-        const { res, j } = await fetchJson(`${baseUrl}/feed/holders?limit=${encodeURIComponent(cap)}`);
+        const { res, j } = await fetchJson(`${baseUrl}/feed/holders?limit=${encodeURIComponent(cap)}`, { timeoutMs: 15_000 });
         if (res.ok && j?.ok && Array.isArray(j.rows)) {
           const data = j.rows
             .map((r) => {
@@ -1070,11 +1057,11 @@ export const blockswapAdapter = {
           return data;
         }
       } catch (e) {
-        console.warn("[relayer feed] holders failed:", e?.message || e);
+        if (DEBUG_LOGS) console.warn("[relayer feed] holders failed:", e?.message || e);
       }
     }
 
-    // 2) Supabase fallback (if you keep a matching table)
+    // 2) Supabase fallback
     if (supaOk()) {
       try {
         const { data, error } = await supabase
@@ -1187,7 +1174,7 @@ export const blockswapAdapter = {
       __holdersCache = { atMs: nowMs(), key, data };
       return data;
     } catch (e) {
-      console.warn("[holders] failed:", e?.shortMessage || e?.message || e);
+      if (DEBUG_LOGS) console.warn("[holders] failed:", e?.shortMessage || e?.message || e);
       if (isLogsFailure(e)) bumpLogsCooldown();
       return [];
     }
@@ -1281,24 +1268,13 @@ export const blockswapAdapter = {
     const pc = this._publicClient();
     const wc = this._walletClient();
 
-    const inv = await safeRead(
-      pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
-      0n,
-      "OZ.balanceOf(SWAP) buy"
-    );
+    const inv = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) buy");
 
     if (inv < ozWei) {
-      throw new Error(
-        `Swap is out of inventory. OZ in contract: ${formatUnits(inv, 18)} (need ${formatUnits(ozWei, 18)}).`
-      );
+      throw new Error(`Swap is out of inventory. OZ in contract: ${formatUnits(inv, 18)} (need ${formatUnits(ozWei, 18)}).`);
     }
 
-    const sellPricePerBrick = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "sellPricePerBrick",
-    });
-
+    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
     const totalIn = costRoundedUp(ozWei, sellPricePerBrick);
 
     const allowance = await pc.readContract({
@@ -1397,26 +1373,14 @@ export const blockswapAdapter = {
     const ozWei = toBn18(ouncesWhole);
     const pc = this._publicClient();
 
-    const inv = await safeRead(
-      pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
-      0n,
-      "OZ.balanceOf(SWAP) gasless buy"
-    );
+    const inv = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy");
     if (inv < ozWei) throw new Error(`Swap is out of inventory (need ${formatUnits(ozWei, 18)} oz).`);
 
-    const sellPricePerBrick = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "sellPricePerBrick",
-    });
+    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
     const permitValue = costRoundedUp(ozWei, sellPricePerBrick);
 
-    const nonce = await pc.readContract({
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "nonces",
-      args: [walletAddress],
-    });
+    // NOTE: This nonce is from your BlockSwap relayed-buy nonce tracker (not USDC nonce)
+    const nonce = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "nonces", args: [walletAddress] });
 
     const nowSec = Math.floor(Date.now() / 1000);
     const buyDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
@@ -1440,12 +1404,7 @@ export const blockswapAdapter = {
 
     let permitNonce;
     try {
-      permitNonce = await pc.readContract({
-        address: USDC,
-        abi: ERC20_PERMIT_ABI,
-        functionName: "nonces",
-        args: [walletAddress],
-      });
+      permitNonce = await pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "nonces", args: [walletAddress] });
     } catch {
       throw new Error(
         `USDC at ${USDC} does not look permit-capable (missing nonces()).\n` +
@@ -1481,10 +1440,11 @@ export const blockswapAdapter = {
       message,
     });
 
-    const res = await fetch(`${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`, {
+    const endpoint = `${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`;
+
+    const { res, j, text } = await fetchJson(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+      body: {
         user: walletAddress,
         ozWei: ozWei.toString(),
         buyDeadline: Number(buyDeadline),
@@ -1492,11 +1452,12 @@ export const blockswapAdapter = {
         permitValue: permitValue.toString(),
         permitDeadline: Number(permitDeadline),
         permitSignature,
-      }),
+      },
+      timeoutMs: 25_000,
+      noStore: true,
     });
 
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.error || `Relayer buy-permit failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) throw new Error(j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`);
 
     return { hash: j.hash };
   },

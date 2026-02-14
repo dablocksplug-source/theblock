@@ -1,0 +1,48 @@
+{
+  "round": 1,
+  "poolUsdc6": "50000000000",
+  "totalOzWei": "3979000000000000000000",
+  "merkleRoot": "0x72a59feb8d2e8b7504ef02b7748d031fe671af5c0a6724e5d8cff36c19915193",
+  "entries": [
+    {
+      "wallet": "0xb2b7438c699e5b2389a15094ebaf1640eb96caeb",
+      "eligibleOzWei": "1080000000000000000000",
+      "payoutUsdc6": "13571249057",
+      "leaf": "0xe3e773e2aba71ea1d07b559bf845eee2bbfb7f3b97b2c585be73665e5fa563cc",
+      "proof": [
+        "0xe808ff6c9a973e9335a4835394173719f37ede745f14d82c67ed75d6bc79d631",
+        "0xe7f5fb26ef4df7194c413ce66869c4ea2eff626392436bd4903706185529006c"
+      ]
+    },
+    {
+      "wallet": "0xa91d0b0c4e9bd587aee3cf61ada8ea0ea69b0093",
+      "eligibleOzWei": "1035000000000000000000",
+      "payoutUsdc6": "13005780346",
+      "leaf": "0xe808ff6c9a973e9335a4835394173719f37ede745f14d82c67ed75d6bc79d631",
+      "proof": [
+        "0xe3e773e2aba71ea1d07b559bf845eee2bbfb7f3b97b2c585be73665e5fa563cc",
+        "0xe7f5fb26ef4df7194c413ce66869c4ea2eff626392436bd4903706185529006c"
+      ]
+    },
+    {
+      "wallet": "0x5ca7541e7e7ea07dc0114d64090df3f39af5623c",
+      "eligibleOzWei": "1000000000000000000000",
+      "payoutUsdc6": "12565971349",
+      "leaf": "0x30ab53395ece02f9a602a9e29c3f4b86e4bed5fc8d667e10a02f4c9c07a9c870",
+      "proof": [
+        "0x3a4ccd2b03a6990b96e31323b9a5a2fb328405640b3a8128662081f2b8e1fdb4",
+        "0x1b2c079ead2f5dde018245c6a0925b449a5fd993c11909b7b2b948f11e95550b"
+      ]
+    },
+    {
+      "wallet": "0x0332972028d900b788254f19549c2f94979a5f1f",
+      "eligibleOzWei": "864000000000000000000",
+      "payoutUsdc6": "10856999248",
+      "leaf": "0x3a4ccd2b03a6990b96e31323b9a5a2fb328405640b3a8128662081f2b8e1fdb4",
+      "proof": [
+        "0x30ab53395ece02f9a602a9e29c3f4b86e4bed5fc8d667e10a02f4c9c07a9c870",
+        "0x1b2c079ead2f5dde018245c6a0925b449a5fd993c11909b7b2b948f11e95550b"
+      ]
+    }
+  ]
+}
