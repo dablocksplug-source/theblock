@@ -115,72 +115,67 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (fixes Coinbase/WC weird outputs)
+// SIGNATURE NORMALIZATION (STRICT)
+// - Rejects non-hex (prevents 450/1986 char garbage)
+// - Accepts 64/65/66 byte formats (130/132/134 chars)
 // -------------------------------
-function isHexSigLike(s) {
-  const t = String(s || "").trim();
-  if (!t.startsWith("0x")) return false;
-  if (!/^0x[0-9a-fA-F]+$/.test(t)) return false;
-  // allow 64-byte compact (0x + 128 => 130 total), or 65-byte (0x + 130 => 132 total)
-  return t.length === 130 || t.length === 132;
+function isHexOnly(s) {
+  return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
-function normalizeSigHex(sig) {
-  try {
-    if (typeof sig === "string") {
-      const trimmed = sig.trim();
-      if (!trimmed || trimmed === "0x") throw new Error("Signature missing (wallet popup likely blocked).");
-      // accept any hex-ish; enforce length later
-      if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
-      return trimmed;
-    }
-
-    if (sig && typeof sig === "object") {
-      const r = sig.r || sig.R;
-      const s = sig.s || sig.S;
-      const v = sig.v ?? sig.V;
-      const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
-
-      if (r && s && (v != null || yParity != null)) {
-        return signatureToHex({
-          r,
-          s,
-          ...(v != null ? { v: Number(v) } : {}),
-          ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
-        });
-      }
-
-      if (sig.signature) return normalizeSigHex(sig.signature);
-      return String(sig);
-    }
-
-    return String(sig ?? "");
-  } catch (e) {
-    throw new Error(e?.message || "Signature normalization failed.");
+function normalizeSigHexStrict(sig) {
+  // Accept: string OR {signature} OR {r,s,v} objects
+  if (typeof sig === "string") {
+    const t = sig.trim().replace(/^"+|"+$/g, "");
+    if (!t || t === "0x") throw new Error("Signature missing (wallet popup likely blocked).");
+    if (!t.startsWith("0x")) throw new Error("Signature is not hex (missing 0x).");
+    if (!isHexOnly(t)) throw new Error("Signature is not valid hex.");
+    return t;
   }
+
+  if (sig && typeof sig === "object") {
+    if (sig.signature) return normalizeSigHexStrict(sig.signature);
+
+    const r = sig.r || sig.R;
+    const s = sig.s || sig.S;
+    const v = sig.v ?? sig.V;
+    const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
+
+    if (r && s && (v != null || yParity != null)) {
+      const hex = signatureToHex({
+        r,
+        s,
+        ...(v != null ? { v: Number(v) } : {}),
+        ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
+      });
+      return normalizeSigHexStrict(hex);
+    }
+  }
+
+  throw new Error("Signature returned in an unsupported format.");
 }
 
 // Expand EIP-2098 compact signature (64 bytes) => 65 bytes
 function expandCompactSig(sigHex) {
-  const s0 = normalizeSigHex(sigHex);
-  const s = String(s0 || "").trim();
-  if (!s.startsWith("0x")) throw new Error("Signature missing (wallet popup likely blocked).");
+  const s = normalizeSigHexStrict(sigHex);
 
-  // 65-byte already (0x + 130 hex)
+  // 65-byte (0x + 130 hex)
   if (s.length === 132) return s;
+
+  // 66-byte (0x + 132 hex) keep (some wallets return this)
+  if (s.length === 134) return s;
 
   // 64-byte compact (0x + 128 hex)
   if (s.length !== 130) {
-    throw new Error(`Invalid signature length: ${s.length} (expected 132 or 130).`);
+    throw new Error(`Invalid signature length: ${s.length} (expected 130/132/134).`);
   }
 
-  const r = s.slice(2, 2 + 64);
-  const vs = s.slice(2 + 64); // 64 hex chars
+  const r = s.slice(2, 66);
+  const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
   const v = (vsFirstByte & 0x80) ? 28 : 27;
 
-  // clear highest bit of vs to get s
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
   const sRest = vs.slice(2);
   const sFixed = sFirstByte + sRest;
@@ -189,23 +184,21 @@ function expandCompactSig(sigHex) {
   return `0x${r}${sFixed}${vHex}`;
 }
 
-function assertSigLen(label, sigHex) {
-  const s = expandCompactSig(sigHex);
-  if (!isHexSigLike(s)) {
-    throw new Error(`${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`);
+function assertSigLen(label, sig) {
+  const s = expandCompactSig(sig);
+  if (!isHexOnly(s)) throw new Error(`${label} invalid hex.`);
+  if (s.length !== 130 && s.length !== 132 && s.length !== 134) {
+    throw new Error(`${label} invalid length: ${s.length} (expected 130/132/134).`);
   }
   return s;
 }
 
+// personal_sign helper (wallets differ on ordering)
 async function personalSign(provider, msgHash, user) {
-  // Try common ordering first: [data, address]
   try {
-    const sig = await provider.request({ method: "personal_sign", params: [msgHash, user] });
-    return sig;
+    return await provider.request({ method: "personal_sign", params: [msgHash, user] });
   } catch {
-    // Some wallets/providers want [address, data]
-    const sig = await provider.request({ method: "personal_sign", params: [user, msgHash] });
-    return sig;
+    return await provider.request({ method: "personal_sign", params: [user, msgHash] });
   }
 }
 
@@ -288,10 +281,10 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   // Sign raw 32-byte hash (contract uses toEthSignedMessageHash(msgHash))
   const rawSig = await personalSign(provider, msgHash, user);
 
-  // ✅ normalize + expand compact signature
+  // ✅ STRICT normalize + expand compact signature
   const signature = assertSigLen("nicknameSignature", rawSig);
 
-  // Relayer may verify either signature hex or v/r/s — we send BOTH (compatible either way)
+  // Relayer may verify either signature hex or v/r/s — we send BOTH
   const sigObj = hexToSignature(signature);
 
   const res = await fetch(`${relayerUrl}/relay/nickname`, {
@@ -302,12 +295,10 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
       nick: trimmed,
       deadline,
 
-      // v/r/s for old relayer paths
       v: Number(sigObj.v),
       r: sigObj.r,
       s: sigObj.s,
 
-      // full signature for newer relayer paths
       signature,
     }),
   });

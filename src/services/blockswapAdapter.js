@@ -344,65 +344,57 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (fixes Coinbase/WC weird outputs)
+// SIGNATURE NORMALIZATION (STRICT)
+// - Rejects non-hex (prevents 450/1986 char garbage)
+// - Accepts 64/65/66 byte formats (130/132/134 chars)
 // -------------------------------
-function isHexSigLike(s) {
-  const t = String(s || "").trim();
-  if (!t.startsWith("0x")) return false;
-  if (!/^0x[0-9a-fA-F]+$/.test(t)) return false;
-  // allow 64-byte compact (0x + 128 => 130 total), or 65-byte (0x + 130 => 132 total)
-  return t.length === 130 || t.length === 132;
+function isHexOnly(s) {
+  return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
-function normalizeSigHex(sig) {
-  try {
-    if (typeof sig === "string") {
-      const trimmed = sig.trim();
-      if (trimmed === "0x" || trimmed.length < 10) return trimmed;
-      if (isHexSigLike(trimmed)) return trimmed;
-      if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
-      return trimmed;
-    }
-
-    if (sig && typeof sig === "object") {
-      const r = sig.r || sig.R;
-      const s = sig.s || sig.S;
-      const v = sig.v ?? sig.V;
-      const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
-
-      if (r && s && (v != null || yParity != null)) {
-        const hex = signatureToHex({
-          r,
-          s,
-          ...(v != null ? { v: Number(v) } : {}),
-          ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
-        });
-        return hex;
-      }
-
-      if (sig.signature) return normalizeSigHex(sig.signature);
-      return String(sig);
-    }
-
-    return String(sig ?? "");
-  } catch {
-    return String(sig ?? "");
+function normalizeSigHexStrict(sig) {
+  if (typeof sig === "string") {
+    const t = sig.trim().replace(/^"+|"+$/g, "");
+    if (!t || t === "0x") throw new Error("Signature missing/blocked (empty).");
+    if (!t.startsWith("0x")) throw new Error("Signature is not hex (missing 0x).");
+    if (!isHexOnly(t)) throw new Error("Signature is not valid hex.");
+    return t;
   }
+
+  if (sig && typeof sig === "object") {
+    if (sig.signature) return normalizeSigHexStrict(sig.signature);
+
+    const r = sig.r || sig.R;
+    const s = sig.s || sig.S;
+    const v = sig.v ?? sig.V;
+    const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
+
+    if (r && s && (v != null || yParity != null)) {
+      const hex = signatureToHex({
+        r,
+        s,
+        ...(v != null ? { v: Number(v) } : {}),
+        ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
+      });
+      return normalizeSigHexStrict(hex);
+    }
+  }
+
+  throw new Error("Signature returned in an unsupported format.");
 }
 
-// ✅ expand compact EIP-2098 signature (64 bytes) => 65 bytes
 function expandCompactSig(sigHex) {
-  const s = String(sigHex || "").trim();
-  if (!s.startsWith("0x")) return s;
+  const s = normalizeSigHexStrict(sigHex);
 
-  // 65-byte already (0x + 130 hex)
+  // 65-byte
   if (s.length === 132) return s;
+  // 66-byte (some providers)
+  if (s.length === 134) return s;
+  // 64-byte compact
+  if (s.length !== 130) throw new Error(`Invalid signature length: ${s.length} (expected 130/132/134).`);
 
-  // 64-byte compact (0x + 128 hex)
-  if (s.length !== 130) return s;
-
-  const r = s.slice(2, 2 + 64);
-  const vs = s.slice(2 + 64); // 64 hex chars
+  const r = s.slice(2, 66);
+  const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
   const v = (vsFirstByte & 0x80) ? 28 : 27;
@@ -415,27 +407,21 @@ function expandCompactSig(sigHex) {
   return `0x${r}${sFixed}${vHex}`;
 }
 
-function assertSigLen(label, sigHex) {
-  const s0 = normalizeSigHex(sigHex);
-  if (!s0 || s0 === "0x") {
-    throw new Error(`${label} missing/blocked (empty). Please approve the signature prompt and try again.`);
-  }
-
-  const s = expandCompactSig(s0);
-  if (!isHexSigLike(s)) {
-    throw new Error(`${label} invalid. Got ${String(s || "").length} chars; expected 130 (compact) or 132 (65-byte) total.`);
+function assertSigLen(label, sig) {
+  const s = expandCompactSig(sig);
+  if (!isHexOnly(s)) throw new Error(`${label} invalid hex.`);
+  if (s.length !== 130 && s.length !== 132 && s.length !== 134) {
+    throw new Error(`${label} invalid length: ${s.length} (expected 130/132/134).`);
   }
   return s;
 }
 
-// ✅ personal_sign helper (wallets differ on param ordering)
+// personal_sign helper (wallets differ on param ordering)
 async function personalSign(provider, msgHash, user) {
   try {
-    const sig = await provider.request({ method: "personal_sign", params: [msgHash, user] });
-    return sig;
+    return await provider.request({ method: "personal_sign", params: [msgHash, user] });
   } catch {
-    const sig = await provider.request({ method: "personal_sign", params: [user, msgHash] });
-    return sig;
+    return await provider.request({ method: "personal_sign", params: [user, msgHash] });
   }
 }
 
@@ -730,7 +716,6 @@ export const blockswapAdapter = {
     const ozWei = toBn18(ouncesWhole);
     const pc = this._publicClient();
 
-    // ✅ parallelize preflight reads (less delay before wallet pops)
     const nowSec = Math.floor(Date.now() / 1000);
     const buyDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
     const permitDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
@@ -738,9 +723,7 @@ export const blockswapAdapter = {
     const [inv, sellPricePerBrick, nonce, permitNonce, usdcName, usdcVersion] = await Promise.all([
       safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy"),
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" }),
-      // relayed-buy nonce (BlockSwap nonces)
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "nonces", args: [walletAddress] }),
-      // permit nonce (USDC nonces)
       (async () => {
         try {
           return await pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "nonces", args: [walletAddress] });
@@ -768,7 +751,7 @@ export const blockswapAdapter = {
       chainId: Number(C.CHAIN_ID),
     });
 
-    // ✅ Use the ACTIVE EIP-1193 provider for personal_sign (fixes Coinbase/WC)
+    // ✅ Use ACTIVE provider for personal_sign
     const eip1193 = mustProvider();
     const rawBuySig = await personalSign(eip1193, msgHash, walletAddress);
 
@@ -798,7 +781,6 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
-    // ✅ typed data signing via walletClient is usually ok across wallets
     const wc = this._walletClient();
     const rawPermitSig = await wc.signTypedData({
       account: walletAddress,
@@ -808,7 +790,7 @@ export const blockswapAdapter = {
       message,
     });
 
-    // ✅ normalize + expand compact signatures BEFORE posting
+    // ✅ STRICT normalize + expand compact signatures BEFORE posting
     const buySignature = assertSigLen("buySignature", rawBuySig);
     const permitSignature = assertSigLen("permitSignature", rawPermitSig);
 
