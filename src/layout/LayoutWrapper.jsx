@@ -1,5 +1,5 @@
 // src/layout/LayoutWrapper.jsx
-import React, { useMemo, useState, useEffect } from "react";
+import React from "react";
 import { Link, useLocation, Outlet } from "react-router-dom";
 
 import { useWallet } from "../context/WalletContext";
@@ -9,28 +9,15 @@ import WalletPanel from "../components/WalletPanel";
 import NicknameModal from "../components/NicknameModal";
 
 export default function LayoutWrapper({ children }) {
-  const {
-    walletAddress,
-    isConnected,
-    disconnectWallet,
-    connectMetaMask,
-    connectCoinbase,
-    connectWalletConnect,
-    connectStatus, // optional from your context (pending/idle)
-  } = useWallet();
-
+  const { walletAddress, connectWallet, disconnectWallet, isConnected } = useWallet();
   const { nickname, useNickname } = useNicknameContext();
   const location = useLocation();
 
-  const [err, setErr] = useState("");
-  const [open, setOpen] = useState(false);
-
-  // close dropdown on route change
-  useEffect(() => {
-    setOpen(false);
-    setErr("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname]);
+  // ✅ TOP header quick links (gated/off for now)
+  const headerLinks = [
+    { name: "BlockMarket", path: "/blockmarket", enabled: false },
+    { name: "TheAlley", path: "/thealley", enabled: false },
+  ];
 
   const navItems = [
     { name: "BlockSwap", path: "/blockswap" },
@@ -44,114 +31,14 @@ export default function LayoutWrapper({ children }) {
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
 
-  const shortAddress = useMemo(() => {
-    if (!walletAddress) return "Not connected";
-    return walletAddress.length > 10
+  const shortAddress =
+    walletAddress && walletAddress.length > 10
       ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
-      : walletAddress;
-  }, [walletAddress]);
+      : walletAddress || "Not connected";
 
-  const walletChipLabel = useMemo(() => {
-    if (!isConnected) return "Connect";
-    const dn = String(displayName || "").trim() || "Wallet";
-    const dnShort = dn.length > 18 ? `${dn.slice(0, 18)}…` : dn;
-    return `${dnShort} (${shortAddress})`;
-  }, [isConnected, displayName, shortAddress]);
-
-  const disabledConnecting = connectStatus === "pending";
-
-  const TopConnectDropdown = () => {
-    if (isConnected) {
-      return (
-        <button
-          onClick={() => {
-            setErr("");
-            disconnectWallet?.();
-          }}
-          className="text-sm px-3 py-1.5 rounded-xl border border-rose-400/30 text-rose-300 hover:border-rose-300/50"
-          type="button"
-          title="Disconnect wallet"
-        >
-          {walletChipLabel} — Disconnect
-        </button>
-      );
-    }
-
-    return (
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => {
-            setErr("");
-            setOpen((v) => !v);
-          }}
-          className="text-sm px-3 py-1.5 rounded-xl border border-cyan-400/30 text-cyan-300 hover:border-cyan-300/60"
-          aria-expanded={open ? "true" : "false"}
-        >
-          Connect Wallet
-        </button>
-
-        {open ? (
-          <div className="absolute right-0 mt-2 w-48 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl z-50">
-            <button
-              type="button"
-              disabled={disabledConnecting}
-              onClick={async () => {
-                try {
-                  setErr("");
-                  await connectMetaMask?.();
-                  setOpen(false);
-                } catch (e) {
-                  setErr(e?.message || "MetaMask connect failed.");
-                }
-              }}
-              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900 disabled:opacity-50"
-            >
-              MetaMask
-            </button>
-
-            <button
-              type="button"
-              disabled={disabledConnecting}
-              onClick={async () => {
-                try {
-                  setErr("");
-                  await connectCoinbase?.();
-                  setOpen(false);
-                } catch (e) {
-                  setErr(e?.message || "Coinbase connect failed.");
-                }
-              }}
-              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900 disabled:opacity-50"
-            >
-              Coinbase
-            </button>
-
-            <button
-              type="button"
-              disabled={disabledConnecting}
-              onClick={async () => {
-                try {
-                  setErr("");
-                  await connectWalletConnect?.();
-                  setOpen(false);
-                } catch (e) {
-                  setErr(e?.message || "WalletConnect failed. Check VITE_WC_PROJECT_ID in Vercel.");
-                }
-              }}
-              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900 disabled:opacity-50"
-            >
-              WalletConnect
-            </button>
-
-            <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
-              Tip: On mobile, use WalletConnect.
-            </div>
-          </div>
-        ) : null}
-      </div>
-    );
-  };
+  const walletButtonLabel = isConnected
+    ? `${displayName} (${shortAddress}) — Disconnect`
+    : "Connect Wallet";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100">
@@ -162,35 +49,63 @@ export default function LayoutWrapper({ children }) {
             The Block
           </Link>
 
-          {/* ✅ Top header quick links (placeholders for later) */}
-          <div className="hidden sm:flex items-center gap-3 text-xs">
-            <Link to="/blockmarket" className="text-slate-400 hover:text-cyan-200">
-              BlockMarket
-            </Link>
-            <span className="text-slate-700">•</span>
-            <Link to="/thealley" className="text-slate-400 hover:text-cyan-200">
-              TheAlley
-            </Link>
+          {/* ✅ Header links (gated for now) */}
+          <div className="hidden sm:flex items-center gap-2">
+            {headerLinks.map((item) => {
+              const active = location.pathname === item.path;
+
+              if (!item.enabled) {
+                return (
+                  <span
+                    key={item.path}
+                    className={`text-xs px-2 py-1 rounded-lg border select-none ${
+                      active
+                        ? "border-slate-600 text-slate-300"
+                        : "border-slate-800 text-slate-500"
+                    }`}
+                    title="Coming soon"
+                  >
+                    {item.name}
+                  </span>
+                );
+              }
+
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className={`text-xs px-2 py-1 rounded-lg border ${
+                    active
+                      ? "border-cyan-400/40 text-cyan-200"
+                      : "border-slate-800 text-slate-400 hover:text-cyan-200 hover:border-cyan-400/30"
+                  }`}
+                >
+                  {item.name}
+                </Link>
+              );
+            })}
           </div>
         </div>
 
-        <div className="text-xs text-slate-500 hidden md:block">
+        <div className="text-xs text-slate-500 hidden sm:block">
           Building slow. Shipping steady.
         </div>
 
-        <div className="flex items-center gap-3">
-          <TopConnectDropdown />
-          {/* HUD panel with avatar + nickname + disconnect */}
-          <WalletPanel />
-        </div>
-      </header>
+        <button
+          onClick={isConnected ? disconnectWallet : connectWallet}
+          className={`text-sm px-3 py-1.5 rounded-xl border ${
+            isConnected
+              ? "border-rose-400/30 text-rose-300"
+              : "border-cyan-400/30 text-cyan-300"
+          }`}
+          type="button"
+        >
+          {walletButtonLabel}
+        </button>
 
-      {/* optional error banner (connect errors etc) */}
-      {err ? (
-        <div className="border-b border-rose-500/30 bg-rose-500/10 px-6 py-2 text-xs text-rose-200">
-          {err}
-        </div>
-      ) : null}
+        {/* HUD panel with avatar + nickname + disconnect */}
+        <WalletPanel />
+      </header>
 
       {/* ====== NAV ROW ====== */}
       <nav className="bg-slate-900/60 border-b border-slate-800/40">
