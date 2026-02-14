@@ -3,14 +3,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { z } from "zod";
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  isAddress,
-  parseAbiItem,
-  parseSignature, // ✅ NEW (replaces hexToSignature)
-} from "viem";
+import { createPublicClient, createWalletClient, http, isAddress, parseAbiItem } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -119,7 +112,6 @@ const NICKNAME_MIN_ABI = [
 ] as const;
 
 const BLOCKSWAP_MIN_ABI = [
-  // ✅ legacy relayed buy
   {
     type: "function",
     name: "buyOzRelayed",
@@ -134,8 +126,6 @@ const BLOCKSWAP_MIN_ABI = [
     ],
     outputs: [],
   },
-
-  // ✅ permit flow
   {
     type: "function",
     name: "buyOzRelayedWithPermit",
@@ -167,8 +157,6 @@ const BLOCKSWAP_MIN_ABI = [
     ],
     outputs: [],
   },
-
-  // views
   {
     type: "function",
     name: "nonces",
@@ -252,7 +240,6 @@ function hit(ip: string, limit: number, windowMs: number) {
 function getIp(req: express.Request) {
   const xf = req.headers["x-forwarded-for"];
   const s = (Array.isArray(xf) ? xf[0] : xf || "").toString();
-  // take first IP if list
   const first = s.split(",")[0]?.trim();
   return first || req.socket.remoteAddress || "unknown";
 }
@@ -285,7 +272,6 @@ const BuySchema = z.object({
   signature: z.string().startsWith("0x").optional(),
 });
 
-// ✅ buy-permit schema
 const BuyPermitSchema = z.object({
   user: z.string(),
   ozWei: z.union([z.string(), z.number(), z.bigint()]),
@@ -328,125 +314,17 @@ function lower(a: string) {
   return String(a || "").toLowerCase();
 }
 
-// ✅ Accept lots of wallet varieties (0/1, 27/28, 35/36, 37/38, etc)
+// ✅ Accept lots of wallet varieties (0/1, 27/28, chain-adjusted, etc)
 function normalizeV(v: number): number {
   if (!Number.isFinite(v)) return v;
-  if (v === 0 || v === 1) return v + 27; // yParity -> v
+  if (v === 0 || v === 1) return v + 27;
   if (v === 27 || v === 28) return v;
-  if (v === 35) return 27;
-  if (v === 36) return 28;
-  if (v === 37) return 27;
-  if (v === 38) return 28;
-
-  // If chain-adjusted v (EIP-155 style), map by parity:
-  // odd -> 27, even -> 28
-  if (v > 28) return v % 2 === 0 ? 28 : 27;
-
+  if (v > 28) return v % 2 === 0 ? 28 : 27; // parity fallback
   return v;
-}
-
-// ✅ secp256k1 curve order + low-s normalization (Coinbase mobile fix)
-const SECP256K1_N =
-  0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
-const SECP256K1_HALF_N = SECP256K1_N / 2n;
-
-function flipV(v: number) {
-  // toggle 27 <-> 28 (and handle 0/1 just in case)
-  if (v === 27) return 28;
-  if (v === 28) return 27;
-  if (v === 0) return 28;
-  if (v === 1) return 27;
-  return v;
-}
-
-function normalizeLowS(sig: { v: number; r: `0x${string}`; s: `0x${string}` }) {
-  const sBig = BigInt(sig.s);
-
-  // validity check
-  if (sBig === 0n || sBig >= SECP256K1_N) {
-    throw new Error("Invalid signature 's' value");
-  }
-
-  // If high-s, convert to low-s and flip v
-  if (sBig > SECP256K1_HALF_N) {
-    const lowS = SECP256K1_N - sBig;
-    const sHex = `0x${lowS.toString(16).padStart(64, "0")}` as `0x${string}`;
-    return { v: flipV(sig.v), r: sig.r, s: sHex };
-  }
-
-  return sig;
-}
-
-// parse v/r/s either from v+r+s OR from signature (supports 64/65-byte signatures)
-function parseSig(body: any, prefix?: "buy" | "permit") {
-  const vKey = prefix ? `${prefix}V` : "v";
-  const rKey = prefix ? `${prefix}R` : "r";
-  const sKey = prefix ? `${prefix}S` : "s";
-  const sigKey = prefix ? `${prefix}Signature` : "signature";
-
-  // v/r/s path (explicit)
-  if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
-    const vNumRaw = Number(body[vKey]);
-    if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
-    const vNum = normalizeV(vNumRaw);
-
-    const r = body[rKey] as `0x${string}`;
-    const s = body[sKey] as `0x${string}`;
-    if (typeof r !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(r)) throw new Error(`Invalid ${rKey}`);
-    if (typeof s !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(s)) throw new Error(`Invalid ${sKey}`);
-
-    return normalizeLowS({ v: vNum, r, s });
-  }
-
-  // signature path (preferred)
-  if (body?.[sigKey]) {
-    const sigHex = body[sigKey] as `0x${string}`;
-    if (typeof sigHex !== "string" || !sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}`);
-
-    // 64-byte (EIP-2098) => 0x + 128 hex chars = length 130
-    // 65-byte standard     => length 132
-    if (sigHex.length !== 130 && sigHex.length !== 132) {
-      throw new Error(`Invalid signature length. Expected 130 or 132, got ${sigHex.length}.`);
-    }
-
-    const parsed = parseSignature(sigHex);
-    const vNum = normalizeV(Number(parsed.v));
-    const r = parsed.r as `0x${string}`;
-    const s = parsed.s as `0x${string}`;
-
-    return normalizeLowS({ v: vNum, r, s });
-  }
-
-  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature`);
-}
-
-// ✅ Promise/thenable timeout helper
-async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promise<T> {
-  let t: any;
-  const timeout = new Promise<never>((_, rej) => {
-    t = setTimeout(() => rej(new Error(code)), ms);
-  });
-
-  try {
-    return await Promise.race([Promise.resolve(p), timeout]);
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function requireRelayerMatches() {
-  const onchainRelayer = await publicClient.readContract({
-    address: BLOCKSWAP_ADDRESS,
-    abi: BLOCKSWAP_MIN_ABI,
-    functionName: "relayer",
-  });
-  if (String(onchainRelayer).toLowerCase() !== account.address.toLowerCase()) {
-    throw new Error(`Relayer mismatch. Contract relayer=${onchainRelayer}, server wallet=${account.address}.`);
-  }
 }
 
 /**
- * ✅ KEY FIX: prevents scientific notation (1.08e+21) breaking BigInt
+ * ✅ prevents scientific notation breaking storage and BigInt parsing
  */
 function toIntStringSafe(v: any): string {
   if (v == null) return "0";
@@ -470,6 +348,130 @@ function toIntStringSafe(v: any): string {
 
   if (shift >= 0) return sign + (digits + "0".repeat(shift));
   return "0";
+}
+
+/**
+ * ✅ Decode EIP-2098 64-byte signatures:
+ * sig = r (32) + vs (32)
+ */
+function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
+  const hex = String(sig64 || "");
+  if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature");
+
+  const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
+  const vsBig = BigInt("0x" + hex.slice(66));
+
+  const yParity = Number((vsBig >> 255n) & 1n);
+  const sBig = vsBig & ((1n << 255n) - 1n);
+
+  const s = ("0x" + sBig.toString(16).padStart(64, "0")) as `0x${string}`;
+  const v = normalizeV(27 + yParity);
+
+  return { v, r, s };
+}
+
+/**
+ * ✅ Decode standard 65-byte signatures manually
+ * sig = r (32) + s (32) + v (1)
+ */
+function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
+  const hex = String(sig65 || "");
+  if (!/^0x[0-9a-fA-F]{130}$/.test(hex)) throw new Error("Invalid 65-byte signature");
+
+  const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
+  const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
+  const vRaw = parseInt(hex.slice(130, 132), 16);
+  const v = normalizeV(vRaw);
+  return { v, r, s };
+}
+
+/**
+ * ✅ Decode 66-byte signatures (rare, but seen in some mobile flows):
+ * sig = r (32) + s (32) + v (2 bytes)
+ * We'll take the LAST byte as v (so 0x001b -> 0x1b).
+ */
+function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
+  const hex = String(sig66 || "");
+  if (!/^0x[0-9a-fA-F]{132}$/.test(hex)) throw new Error("Invalid 66-byte signature");
+
+  const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
+  const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
+  const vLastByte = parseInt(hex.slice(132 - 2, 132), 16);
+  const v = normalizeV(vLastByte);
+  return { v, r, s };
+}
+
+// parse v/r/s either from v+r+s OR from signature (64B, 65B, 66B)
+function parseSig(body: any, prefix?: "buy" | "permit") {
+  const vKey = prefix ? `${prefix}V` : "v";
+  const rKey = prefix ? `${prefix}R` : "r";
+  const sKey = prefix ? `${prefix}S` : "s";
+  const sigKey = prefix ? `${prefix}Signature` : "signature";
+
+  // v/r/s path
+  if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
+    const vNumRaw = Number(body[vKey]);
+    if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
+    const vNum = normalizeV(vNumRaw);
+
+    const r = body[rKey] as `0x${string}`;
+    const s = body[sKey] as `0x${string}`;
+    if (typeof r !== "string" || !r.startsWith("0x") || r.length !== 66) throw new Error(`Invalid ${rKey}`);
+    if (typeof s !== "string" || !s.startsWith("0x") || s.length !== 66) throw new Error(`Invalid ${sKey}`);
+
+    return { v: vNum, r, s };
+  }
+
+  // signature path
+  if (body?.[sigKey]) {
+    const sigHex = String(body[sigKey] || "").trim();
+
+    // ✅ if wallet popup was blocked, you often get "0x" or empty here
+    if (!sigHex || sigHex === "0x") {
+      throw new Error(`${sigKey}: Signature missing/blocked (empty). Try again and approve the signature prompt.`);
+    }
+    if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
+
+    // 64-byte EIP-2098
+    if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
+
+    // 65-byte standard
+    if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
+
+    // 66-byte (rare)
+    if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
+
+    throw new Error(
+      `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
+    );
+  }
+
+  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature`);
+}
+
+async function requireRelayerMatches() {
+  const onchainRelayer = await publicClient.readContract({
+    address: BLOCKSWAP_ADDRESS,
+    abi: BLOCKSWAP_MIN_ABI,
+    functionName: "relayer",
+  });
+  if (String(onchainRelayer).toLowerCase() !== account.address.toLowerCase()) {
+    throw new Error(`Relayer mismatch. Contract relayer=${onchainRelayer}, server wallet=${account.address}.`);
+  }
+}
+
+// ✅ Promise/thenable timeout helper
+async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promise<T> {
+  let t: any;
+  const timeout = new Promise<never>((_, rej) => {
+    t = setTimeout(() => rej(new Error(code)), ms);
+  });
+
+  try {
+    return await Promise.race([Promise.resolve(p), timeout]);
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // --------------------
@@ -862,7 +864,6 @@ app.post("/relay/buy", async (req, res) => {
   }
 });
 
-// ✅ buy-permit route
 app.post("/relay/buy-permit", async (req, res) => {
   try {
     const ip = getIp(req);
@@ -918,6 +919,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`ChainId (env): ${CHAIN_ID}`);
   console.log(`Relayer wallet: ${account.address}`);
   console.log(`BlockSwap: ${BLOCKSWAP_ADDRESS}`);
+  console.log(`NicknameRegistry: ${NICKNAME_REGISTRY_ADDRESS || "(unset)"}`);
   console.log(`CORS allowlist: ${Array.from(allowlist).join(", ")}`);
   console.log(`Supabase: ${hasSupabase() ? "ON" : "OFF"}`);
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);

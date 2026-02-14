@@ -16,6 +16,7 @@ import {
   encodeAbiParameters,
   toHex,
   decodeEventLog,
+  signatureToHex,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -637,6 +638,95 @@ async function getPermitDomain({ pc, usdc, chainId }) {
 }
 
 // -------------------------------
+// SIGNATURE NORMALIZATION (FIXES Coinbase/WC weird outputs)
+// -------------------------------
+function isHexSigLike(s) {
+  const t = String(s || "").trim();
+  if (!t.startsWith("0x")) return false;
+  if (!/^0x[0-9a-fA-F]+$/.test(t)) return false;
+  // allow 64-byte compact (0x + 128), or 65-byte (0x + 130), or 66/67 variants used by some libs
+  return t.length === 130 || t.length === 132 || t.length === 134;
+}
+
+function extractHexSigFromString(s) {
+  const t = String(s || "");
+  // find a 0x + 128/130/132 hex sequence in the string
+  const m =
+    t.match(/0x[0-9a-fA-F]{128}\b/) ||
+    t.match(/0x[0-9a-fA-F]{130}\b/) ||
+    t.match(/0x[0-9a-fA-F]{132}\b/);
+  return m ? m[0] : "";
+}
+
+function normalizeSigHex(sig) {
+  try {
+    // already a proper hex signature
+    if (typeof sig === "string") {
+      const trimmed = sig.trim();
+
+      if (isHexSigLike(trimmed)) return trimmed;
+
+      // sometimes wallets return JSON stringified sig objects
+      if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return normalizeSigHex(parsed);
+        } catch {}
+      }
+
+      // sometimes it's a long blob but contains the hex sig inside
+      const extracted = extractHexSigFromString(trimmed);
+      if (isHexSigLike(extracted)) return extracted;
+
+      // last resort: if it’s pure hex but wrong length, still return (relayer will reject)
+      if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
+
+      return trimmed;
+    }
+
+    // object signature: { r, s, v } or { r, s, yParity }
+    if (sig && typeof sig === "object") {
+      const r = sig.r || sig.R;
+      const s = sig.s || sig.S;
+      const v = sig.v ?? sig.V;
+      const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
+
+      // viem signatureToHex accepts { r, s, v } or { r, s, yParity }
+      if (r && s && (v != null || yParity != null)) {
+        const hex = signatureToHex({
+          r,
+          s,
+          ...(v != null ? { v: Number(v) } : {}),
+          ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
+        });
+        return hex;
+      }
+
+      // nested objects?
+      if (sig.signature) return normalizeSigHex(sig.signature);
+
+      // fallback stringification
+      return String(sig);
+    }
+
+    return String(sig ?? "");
+  } catch {
+    return String(sig ?? "");
+  }
+}
+
+function assertSigLen(label, sigHex) {
+  const s = String(sigHex || "").trim();
+  const ok = isHexSigLike(s);
+  if (!ok) {
+    throw new Error(
+      `${label} length invalid. Got ${s.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
+    );
+  }
+  return s;
+}
+
+// -------------------------------
 // Exported adapter
 // -------------------------------
 export const blockswapAdapter = {
@@ -826,438 +916,6 @@ export const blockswapAdapter = {
     };
   },
 
-  // ===== ACTIVITY FEED =====
-  async getRecentActivity({ force = false, lookbackBlocks, max, limit } = {}) {
-    const take = Math.max(1, Number(limit ?? max ?? STREET_LIMIT));
-    const key = makeKey({ chainId: Number(C.CHAIN_ID), take, relayer: relayerOk(), supa: supaOk() });
-
-    const ttl = STREET_POLL_MS;
-    if (!force && shouldUseCache(__activityCache, ttl, key)) return __activityCache.data;
-
-    // 1) RELAYER FEED FIRST
-    if (relayerOk()) {
-      const baseUrl = resolveRelayerUrl().replace(/\/+$/, "");
-      try {
-        const { res, j } = await fetchJson(`${baseUrl}/feed/activity?limit=${encodeURIComponent(take)}`, { timeoutMs: 15_000 });
-        if (res.ok && j?.ok && Array.isArray(j.rows)) {
-          const stable = C.STABLE_SYMBOL || "USDC";
-          const data = j.rows.map((r) => {
-            const kind = String(r?.event_type || "").toUpperCase();
-            const who = r?.wallet ? (String(r.wallet).startsWith("0x") ? r.wallet : `0x${r.wallet}`) : "";
-            const whoLabel = labelOrShort(who);
-            const oz = parseOzWeiToOz(r?.oz_wei);
-            const usdc = parseUsdc6ToNum(r?.usdc_6);
-            const ozTxt = oz.toLocaleString(undefined, { maximumFractionDigits: 6 });
-            const usdcTxt = usdc.toLocaleString(undefined, { maximumFractionDigits: 2 });
-            const text =
-              kind === "BUY"
-                ? `BUY • ${whoLabel} bought ${ozTxt} oz for ${usdcTxt} ${stable}`
-                : kind === "SELLBACK"
-                ? `SELLBACK • ${whoLabel} sold ${ozTxt} oz for ${usdcTxt} ${stable}`
-                : `${kind || "TX"} • ${whoLabel}`;
-
-            return {
-              kind: kind === "SELLBACK" ? "SELL" : kind,
-              who,
-              whoLabel,
-              oz,
-              usdc,
-              blockNumber: Number(r?.block_number || 0),
-              txHash: r?.tx_hash || "",
-              ts: fmtTsFromBlock(Number(r?.block_number || 0)),
-              text,
-            };
-          });
-
-          __activityCache = { atMs: nowMs(), key, data };
-          return data;
-        }
-      } catch (e) {
-        if (DEBUG_LOGS) console.warn("[relayer feed] activity failed:", e?.message || e);
-      }
-    }
-
-    // 2) Supabase (optional)
-    if (supaOk()) {
-      try {
-        const { data, error } = await supabase
-          .from("blockswap_events")
-          .select("event_type,wallet,oz_wei,usdc_6,block_number,tx_hash,created_at")
-          .eq("chain_id", Number(C.CHAIN_ID))
-          .order("block_number", { ascending: false })
-          .limit(take);
-
-        if (!error && Array.isArray(data)) {
-          const stable = C.STABLE_SYMBOL || "USDC";
-          const mapped = data.map((r) => {
-            const kind = String(r?.event_type || "").toUpperCase();
-            const who = r?.wallet ? (String(r.wallet).startsWith("0x") ? r.wallet : `0x${r.wallet}`) : "";
-            const whoLabel = labelOrShort(who);
-            const oz = parseOzWeiToOz(r?.oz_wei);
-            const usdc = parseUsdc6ToNum(r?.usdc_6);
-            const ozTxt = oz.toLocaleString(undefined, { maximumFractionDigits: 6 });
-            const usdcTxt = usdc.toLocaleString(undefined, { maximumFractionDigits: 2 });
-            const text =
-              kind === "BUY"
-                ? `BUY • ${whoLabel} bought ${ozTxt} oz for ${usdcTxt} ${stable}`
-                : kind === "SELLBACK"
-                ? `SELLBACK • ${whoLabel} sold ${ozTxt} oz for ${usdcTxt} ${stable}`
-                : `${kind || "TX"} • ${whoLabel}`;
-
-            return {
-              kind: kind === "SELLBACK" ? "SELL" : kind,
-              who,
-              whoLabel,
-              oz,
-              usdc,
-              blockNumber: Number(r?.block_number || 0),
-              txHash: r?.tx_hash || "",
-              ts: fmtTsFromBlock(Number(r?.block_number || 0)),
-              text,
-            };
-          });
-
-          __activityCache = { atMs: nowMs(), key, data: mapped };
-          return mapped;
-        }
-      } catch {}
-    }
-
-    // 3) RPC fallback
-    const { SWAP } = await resolveAddresses();
-    const pcLogs = this._publicLogsClient();
-    const logsRpcUrl = resolveLogsRpcUrl();
-    const lb = Number(lookbackBlocks || STREET_RPC_LOOKBACK);
-
-    try {
-      const { latest, fromBlock } = await calcLogRange(pcLogs, lb, 25_000);
-
-      const [boughtLogs, soldLogs] = await Promise.all([
-        getLogsChunkedSafe(pcLogs, {
-          address: SWAP,
-          event: EVT_BOUGHT,
-          fromBlock,
-          toBlock: latest,
-          label: "Bought logs",
-          force,
-          maxLogs: 600,
-          maxChunks: 14,
-          rpcUrl: logsRpcUrl,
-          topic0: TOPIC_BOUGHT,
-          decodeEvent: EVT_BOUGHT,
-        }),
-        getLogsChunkedSafe(pcLogs, {
-          address: SWAP,
-          event: EVT_SOLD,
-          fromBlock,
-          toBlock: latest,
-          label: "SoldBack logs",
-          force,
-          maxLogs: 600,
-          maxChunks: 14,
-          rpcUrl: logsRpcUrl,
-          topic0: TOPIC_SOLD,
-          decodeEvent: EVT_SOLD,
-        }),
-      ]);
-
-      const rows = [];
-
-      for (const l of boughtLogs || []) {
-        const who = l?.args?.buyer;
-        const ozWei = BigInt(l?.args?.ozWei ?? 0n);
-        const oz = pickNum(formatUnits(ozWei, 18), 0);
-        const usdc = pickNum(formatUnits(BigInt(l?.args?.usdcTotal ?? 0n), 6), 0);
-        rows.push({
-          kind: "BUY",
-          who,
-          whoLabel: labelOrShort(who),
-          ozWei: ozWei.toString(),
-          oz,
-          usdc,
-          blockNumber: Number(l.blockNumber || 0),
-          txHash: l.transactionHash,
-        });
-      }
-
-      for (const l of soldLogs || []) {
-        const who = l?.args?.seller;
-        const ozWei = BigInt(l?.args?.ozWei ?? 0n);
-        const oz = pickNum(formatUnits(ozWei, 18), 0);
-        const usdc = pickNum(formatUnits(BigInt(l?.args?.usdcPaid ?? 0n), 6), 0);
-        rows.push({
-          kind: "SELL",
-          who,
-          whoLabel: labelOrShort(who),
-          ozWei: ozWei.toString(),
-          oz,
-          usdc,
-          blockNumber: Number(l.blockNumber || 0),
-          txHash: l.transactionHash,
-        });
-      }
-
-      rows.sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
-
-      const stable = C.STABLE_SYMBOL || "USDC";
-      const data = rows.slice(0, take).map((r) => {
-        const ts = fmtTsFromBlock(r.blockNumber);
-        const ozTxt = r.oz.toLocaleString(undefined, { maximumFractionDigits: 6 });
-        const usdcTxt = r.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 });
-
-        const text =
-          r.kind === "BUY"
-            ? `BUY • ${r.whoLabel} bought ${ozTxt} oz for ${usdcTxt} ${stable}`
-            : `SELLBACK • ${r.whoLabel} sold ${ozTxt} oz for ${usdcTxt} ${stable}`;
-
-        return { text, ts, ...r };
-      });
-
-      __activityCache = { atMs: nowMs(), key, data };
-      return data;
-    } catch (e) {
-      if (DEBUG_LOGS) console.warn("[activity] failed:", e?.shortMessage || e?.message || e);
-      if (isLogsFailure(e)) bumpLogsCooldown();
-      return [];
-    }
-  },
-
-  // ===== HOLDERS TABLE =====
-  async getHoldersFromEvents({ force = false, lookbackBlocks, max, limit, maxAddrs, maxRows } = {}) {
-    const cap = Math.max(1, Number(limit ?? max ?? maxRows ?? maxAddrs ?? HOLDERS_LIMIT));
-    const key = makeKey({ chainId: Number(C.CHAIN_ID), cap, relayer: relayerOk(), supa: supaOk() });
-
-    const ttl = HOLDERS_POLL_MS;
-    if (!force && shouldUseCache(__holdersCache, ttl, key)) return __holdersCache.data;
-
-    // 1) RELAYER FEED FIRST
-    if (relayerOk()) {
-      const baseUrl = resolveRelayerUrl().replace(/\/+$/, "");
-      try {
-        const { res, j } = await fetchJson(`${baseUrl}/feed/holders?limit=${encodeURIComponent(cap)}`, { timeoutMs: 15_000 });
-        if (res.ok && j?.ok && Array.isArray(j.rows)) {
-          const data = j.rows
-            .map((r) => {
-              const address = r?.wallet ? (String(r.wallet).startsWith("0x") ? r.wallet : `0x${r.wallet}`) : "";
-              const ozWeiStr = String(r?.oz_wei ?? "0");
-              const oz = parseOzWeiToOz(ozWeiStr);
-              return {
-                address,
-                oz,
-                ozWei: ozWeiStr,
-                label: labelOrShort(address),
-                bricks: oz / OUNCES_PER_BRICK,
-              };
-            })
-            .filter((x) => x.address && x.oz > 0)
-            .sort((a, b) => (b.oz || 0) - (a.oz || 0))
-            .slice(0, cap);
-
-          __holdersCache = { atMs: nowMs(), key, data };
-          return data;
-        }
-      } catch (e) {
-        if (DEBUG_LOGS) console.warn("[relayer feed] holders failed:", e?.message || e);
-      }
-    }
-
-    // 2) Supabase fallback
-    if (supaOk()) {
-      try {
-        const { data, error } = await supabase
-          .from("blockswap_holders")
-          .select("wallet,oz_wei,updated_at")
-          .eq("chain_id", Number(C.CHAIN_ID))
-          .order("oz_wei", { ascending: false })
-          .limit(cap);
-
-        if (!error && Array.isArray(data)) {
-          const mapped = data
-            .map((r) => {
-              const address = r?.wallet ? (String(r.wallet).startsWith("0x") ? r.wallet : `0x${r.wallet}`) : "";
-              const ozWeiStr = String(r?.oz_wei ?? "0");
-              const oz = parseOzWeiToOz(ozWeiStr);
-              return {
-                address,
-                oz,
-                ozWei: ozWeiStr,
-                label: labelOrShort(address),
-                bricks: oz / OUNCES_PER_BRICK,
-              };
-            })
-            .filter((x) => x.address && x.oz > 0);
-
-          __holdersCache = { atMs: nowMs(), key, data: mapped };
-          return mapped;
-        }
-      } catch {}
-    }
-
-    // 3) RPC fallback
-    const { SWAP } = await resolveAddresses();
-    const pcLogs = this._publicLogsClient();
-    const logsRpcUrl = resolveLogsRpcUrl();
-
-    const lb = Number(lookbackBlocks || HOLDERS_RPC_LOOKBACK);
-
-    try {
-      const { latest, fromBlock } = await calcLogRange(pcLogs, lb, 25_000);
-
-      const [boughtLogs, soldLogs] = await Promise.all([
-        getLogsChunkedSafe(pcLogs, {
-          address: SWAP,
-          event: EVT_BOUGHT,
-          fromBlock,
-          toBlock: latest,
-          label: "Bought logs (holders)",
-          force,
-          maxLogs: 1200,
-          maxChunks: 18,
-          rpcUrl: logsRpcUrl,
-          topic0: TOPIC_BOUGHT,
-          decodeEvent: EVT_BOUGHT,
-        }),
-        getLogsChunkedSafe(pcLogs, {
-          address: SWAP,
-          event: EVT_SOLD,
-          fromBlock,
-          toBlock: latest,
-          label: "SoldBack logs (holders)",
-          force,
-          maxLogs: 1200,
-          maxChunks: 18,
-          rpcUrl: logsRpcUrl,
-          topic0: TOPIC_SOLD,
-          decodeEvent: EVT_SOLD,
-        }),
-      ]);
-
-      const map = new Map();
-
-      for (const l of boughtLogs || []) {
-        const addr = String(l?.args?.buyer || "");
-        if (!addr) continue;
-        const k = addr.toLowerCase();
-        const oz = BigInt(l?.args?.ozWei ?? 0n);
-        const cur = map.get(k) || { address: addr, ozWei: 0n };
-        cur.address = addr;
-        cur.ozWei = (cur.ozWei || 0n) + oz;
-        map.set(k, cur);
-      }
-
-      for (const l of soldLogs || []) {
-        const addr = String(l?.args?.seller || "");
-        if (!addr) continue;
-        const k = addr.toLowerCase();
-        const oz = BigInt(l?.args?.ozWei ?? 0n);
-        const cur = map.get(k) || { address: addr, ozWei: 0n };
-        cur.address = addr;
-        cur.ozWei = (cur.ozWei || 0n) - oz;
-        map.set(k, cur);
-      }
-
-      const data = Array.from(map.values())
-        .filter((x) => (x?.ozWei || 0n) > 0n)
-        .sort((a, b) => (b.ozWei > a.ozWei ? 1 : b.ozWei < a.ozWei ? -1 : 0))
-        .slice(0, cap)
-        .map((x) => {
-          const oz = pickNum(formatUnits(x.ozWei, 18), 0);
-          return {
-            address: x.address,
-            oz,
-            ozWei: x.ozWei.toString(),
-            label: labelOrShort(x.address),
-            bricks: oz / OUNCES_PER_BRICK,
-          };
-        });
-
-      __holdersCache = { atMs: nowMs(), key, data };
-      return data;
-    } catch (e) {
-      if (DEBUG_LOGS) console.warn("[holders] failed:", e?.shortMessage || e?.message || e);
-      if (isLogsFailure(e)) bumpLogsCooldown();
-      return [];
-    }
-  },
-
-  // aliases
-  async getHoldersSnapshot(opts = {}) {
-    return this.getHoldersFromEvents(opts);
-  },
-  async getRecentActivitySnapshot(opts = {}) {
-    return this.getRecentActivity(opts);
-  },
-
-  // ===== ADMIN (on-chain) =====
-  async adminSetBuyPaused({ walletAddress, paused }) {
-    const { SWAP } = await resolveAddresses();
-    if (!walletAddress) throw new Error("Connect wallet.");
-    const wc = this._walletClient();
-
-    const hash = await wc.writeContract({
-      account: walletAddress,
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "setBuyPaused",
-      args: [!!paused],
-    });
-
-    return { hash };
-  },
-
-  async adminSetPrices({ walletAddress, sellPricePerBrick, buybackFloorPerBrick }) {
-    const { SWAP } = await resolveAddresses();
-    if (!walletAddress) throw new Error("Connect wallet.");
-
-    const sell = toBn6(sellPricePerBrick);
-    const floor = toBn6(buybackFloorPerBrick);
-
-    const wc = this._walletClient();
-    const hash = await wc.writeContract({
-      account: walletAddress,
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "setPrices",
-      args: [sell, floor],
-    });
-
-    return { hash };
-  },
-
-  async adminSetTreasury({ walletAddress, treasury }) {
-    const { SWAP } = await resolveAddresses();
-    if (!walletAddress) throw new Error("Connect wallet.");
-    const t = mustAddr("Treasury", treasury);
-
-    const wc = this._walletClient();
-    const hash = await wc.writeContract({
-      account: walletAddress,
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "setTreasury",
-      args: [t],
-    });
-
-    return { hash };
-  },
-
-  async adminSetRelayer({ walletAddress, relayer }) {
-    const { SWAP } = await resolveAddresses();
-    if (!walletAddress) throw new Error("Connect wallet.");
-    const r = mustAddr("Relayer", relayer);
-
-    const wc = this._walletClient();
-    const hash = await wc.writeContract({
-      account: walletAddress,
-      address: SWAP,
-      abi: BlockSwap.abi,
-      functionName: "setRelayer",
-      args: [r],
-    });
-
-    return { hash };
-  },
-
   // ===== BUY/SELL (direct) =====
   async buyOz({ walletAddress, ouncesWhole }) {
     const { SWAP, USDC, OZ } = await resolveAddresses();
@@ -1373,18 +1031,42 @@ export const blockswapAdapter = {
     const ozWei = toBn18(ouncesWhole);
     const pc = this._publicClient();
 
-    const inv = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy");
-    if (inv < ozWei) throw new Error(`Swap is out of inventory (need ${formatUnits(ozWei, 18)} oz).`);
-
-    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
-    const permitValue = costRoundedUp(ozWei, sellPricePerBrick);
-
-    // NOTE: This nonce is from your BlockSwap relayed-buy nonce tracker (not USDC nonce)
-    const nonce = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "nonces", args: [walletAddress] });
-
+    // ✅ parallelize preflight reads (less delay before wallet pops)
     const nowSec = Math.floor(Date.now() / 1000);
     const buyDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
     const permitDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
+
+    const [
+      inv,
+      sellPricePerBrick,
+      nonce,
+      permitNonce,
+      // permit domain pieces (safe)
+      usdcName,
+      usdcVersion,
+    ] = await Promise.all([
+      safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy"),
+      pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" }),
+      // relayed-buy nonce (BlockSwap nonces)
+      pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "nonces", args: [walletAddress] }),
+      // permit nonce (USDC nonces)
+      (async () => {
+        try {
+          return await pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "nonces", args: [walletAddress] });
+        } catch {
+          throw new Error(
+            `USDC at ${USDC} does not look permit-capable (missing nonces()).\n` +
+              `If you're using MockUSDC, make sure UI is pointed at the NEW deployments file.`
+          );
+        }
+      })(),
+      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "name" }), "USDC", "USDC.name"),
+      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "version" }), "1", "USDC.version"),
+    ]);
+
+    if (inv < ozWei) throw new Error(`Swap is out of inventory (need ${formatUnits(ozWei, 18)} oz).`);
+
+    const permitValue = costRoundedUp(ozWei, sellPricePerBrick);
 
     const msgHash = buildBuyRelayedMsgHash({
       buyer: walletAddress,
@@ -1397,22 +1079,20 @@ export const blockswapAdapter = {
 
     const wc = this._walletClient();
 
-    const buySignature = await wc.signMessage({
+    // ✅ wallet popups should happen ASAP after preflight
+    const rawBuySig = await wc.signMessage({
       account: walletAddress,
       message: { raw: msgHash },
     });
 
-    let permitNonce;
-    try {
-      permitNonce = await pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "nonces", args: [walletAddress] });
-    } catch {
-      throw new Error(
-        `USDC at ${USDC} does not look permit-capable (missing nonces()).\n` +
-          `If you're using MockUSDC, make sure UI is pointed at the NEW deployments file.`
-      );
-    }
-
-    const domain = await getPermitDomain({ pc, usdc: USDC, chainId: Number(C.CHAIN_ID) });
+    // domain (use forced override if present)
+    const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
+    const domain = {
+      name: usdcName,
+      version: forced || String(usdcVersion || "1"),
+      chainId: Number(C.CHAIN_ID),
+      verifyingContract: USDC,
+    };
 
     const types = {
       Permit: [
@@ -1432,13 +1112,17 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
-    const permitSignature = await wc.signTypedData({
+    const rawPermitSig = await wc.signTypedData({
       account: walletAddress,
       domain,
       types,
       primaryType: "Permit",
       message,
     });
+
+    // ✅ normalize & validate signatures BEFORE posting
+    const buySignature = assertSigLen("buySignature", normalizeSigHex(rawBuySig));
+    const permitSignature = assertSigLen("permitSignature", normalizeSigHex(rawPermitSig));
 
     const endpoint = `${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`;
 
@@ -1457,7 +1141,9 @@ export const blockswapAdapter = {
       noStore: true,
     });
 
-    if (!res.ok || !j?.ok) throw new Error(j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`);
+    }
 
     return { hash: j.hash };
   },

@@ -786,6 +786,9 @@ export default function BlockSwap() {
     setToast("");
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
+      if (ensureChain && TARGET_CHAIN_ID) {
+      await ensureChain(TARGET_CHAIN_ID);
+    }
       if (wrongChain) throw new Error(`Wrong network. Switch to chain ${TARGET_CHAIN_ID}.`);
       if (snap?.buyPaused) throw new Error("Buys are paused right now.");
       if (buyTotalOz <= 0) throw new Error("Enter an amount to buy.");
@@ -821,6 +824,9 @@ export default function BlockSwap() {
     setToast("");
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
+      if (ensureChain && TARGET_CHAIN_ID) {
+  await ensureChain(TARGET_CHAIN_ID);
+}
       if (wrongChain) throw new Error(`Wrong network. Switch to chain ${TARGET_CHAIN_ID}.`);
       if (sellTotalOz <= 0) throw new Error("Enter an amount to sell back.");
 

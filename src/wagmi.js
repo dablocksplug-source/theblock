@@ -3,8 +3,11 @@ import { http, createConfig } from "wagmi";
 import { baseSepolia, base } from "wagmi/chains";
 import { metaMask, coinbaseWallet, walletConnect } from "wagmi/connectors";
 
+// Accept BOTH env styles (so Vercel can't "break" WC by name mismatch)
 const WALLETCONNECT_PROJECT_ID =
-  import.meta.env.VITE_WC_PROJECT_ID || "";
+  import.meta.env.VITE_WC_PROJECT_ID ||
+  import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ||
+  "";
 
 // Helps WalletConnect identify your app properly
 const APP_URL =
@@ -32,14 +35,11 @@ export const wagmiConfig = createConfig({
           walletConnect({
             projectId: WALLETCONNECT_PROJECT_ID,
             showQrModal: true,
-
             metadata: {
               name: "The Block",
               description: "BlockSwap + Rewards",
               url: APP_URL,
-              icons: [
-                `${APP_URL}/icons/icon-512.png`, // change later if needed
-              ],
+              icons: [`${APP_URL}/icons/icon-512.png`],
             },
           }),
         ]
@@ -48,8 +48,7 @@ export const wagmiConfig = createConfig({
 
   transports: {
     [chain.id]: http(
-      import.meta.env.VITE_RPC_URL ||
-        chain.rpcUrls.default.http[0]
+      import.meta.env.VITE_RPC_URL || chain.rpcUrls.default.http[0]
     ),
   },
 });

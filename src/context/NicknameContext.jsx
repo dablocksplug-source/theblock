@@ -1,7 +1,11 @@
 // src/context/NicknameContext.jsx
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useWallet } from "./WalletContext";
-import { setNickname as setNicknameDirect, setNicknameRelayed, getNickname } from "../utils/nicknameAPI";
+import {
+  setNickname as setNicknameDirect,
+  setNicknameRelayed,
+  getNickname,
+} from "../utils/nicknameAPI";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const STORAGE_KEY = "theblock_nickname_settings_v2";
@@ -18,6 +22,11 @@ function safeParse(json, fallback) {
   }
 }
 
+function envBool(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
 export function NicknameProvider({ children }) {
   const { walletAddress, provider, isConnected } = useWallet();
   const addrKey = useMemo(() => normalizeAddr(walletAddress), [walletAddress]);
@@ -29,8 +38,18 @@ export function NicknameProvider({ children }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  // ✅ IMPORTANT: ensure adapter signs with the *active* provider (Coinbase/WC/mobile-safe)
+  useEffect(() => {
+    try {
+      if (provider && typeof provider.request === "function") {
+        blockswapAdapter.setProvider(provider);
+      }
+    } catch {}
+  }, [provider]);
+
   // load local
   useEffect(() => {
+    if (typeof window === "undefined") return;
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
 
@@ -43,6 +62,7 @@ export function NicknameProvider({ children }) {
 
   // persist local
   useEffect(() => {
+    if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(
         STORAGE_KEY,
@@ -99,6 +119,7 @@ export function NicknameProvider({ children }) {
           blockswapAdapter.setLabel({ walletAddress, label: trimmed });
         } catch {}
       } catch (err) {
+        // normal: no nickname set yet / contract call failed
         console.debug("No nickname on chain for this wallet:", err?.message);
       }
     })();
@@ -135,12 +156,12 @@ export function NicknameProvider({ children }) {
       try {
         await setNicknameRelayed(trimmed, walletAddress, provider);
       } catch (e) {
-        const allowDirect = String(import.meta.env.VITE_ALLOW_DIRECT_NICKNAME || "") === "true";
+        const allowDirect = envBool(import.meta.env.VITE_ALLOW_DIRECT_NICKNAME);
         if (!allowDirect) {
           throw new Error(
             `Gasless nickname failed: ${e?.shortMessage || e?.message || e}\n` +
               `Fix: ensure relayer exposes POST /relay/nickname and VITE_RELAYER_URL is set.\n` +
-              `Dev escape hatch: set VITE_ALLOW_DIRECT_NICKNAME=true.`
+              `Dev escape hatch: set VITE_ALLOW_DIRECT_NICKNAME=true (or 1).`
           );
         }
         await setNicknameDirect(trimmed, walletAddress);
@@ -194,10 +215,12 @@ export function useNicknameContext() {
 export function useNickname() {
   return useNicknameContext();
 }
+
 export function getDisplayName({ walletAddress, nickname, useNickname }) {
   if (useNickname && nickname && nickname.trim().length > 0) return nickname.trim();
   if (!walletAddress) return "Unknown";
   const addr = String(walletAddress);
   return addr.length <= 10 ? addr : `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
+
 export default NicknameProvider;
