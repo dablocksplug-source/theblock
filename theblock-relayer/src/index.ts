@@ -3,7 +3,13 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { z } from "zod";
-import { createPublicClient, createWalletClient, http, isAddress, parseAbiItem } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddress,
+  parseAbiItem,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -50,6 +56,9 @@ const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 
 // optional admin key for /admin/sync-now
 const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
+
+// optional debug flag for signature parsing messages
+const DEBUG_SIG = String(ENV.DEBUG_SIG || "").trim() === "1";
 
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
@@ -268,44 +277,62 @@ function zodMsg(e: any) {
 }
 
 // --------------------
-// schemas
+// schemas (BULLETPROOF: allow nulls from mobile wallets / sloppy clients)
 // --------------------
+const zNullishToUndef = <T extends z.ZodTypeAny>(inner: T) =>
+  z.preprocess((v) => (v === null || v === undefined || v === "" ? undefined : v), inner.optional());
+
+const zStringAddr = z.string().refine((v) => isAddress(v), "Invalid address");
+
+const zHex32 = z
+  .string()
+  .startsWith("0x")
+  .refine((v) => /^0x[0-9a-fA-F]{64}$/.test(v), "Invalid bytes32 hex");
+
+const zHexSig = z
+  .string()
+  .startsWith("0x")
+  .refine((v) => /^0x[0-9a-fA-F]+$/.test(v), "Signature must be hex");
+
 const NicknameSchema = z.object({
-  user: z.string(),
+  user: zStringAddr,
   nick: z.string().min(3).max(24),
   deadline: z.union([z.string(), z.number()]),
-  v: z.union([z.number(), z.string()]).optional(),
-  r: z.string().startsWith("0x").optional(),
-  s: z.string().startsWith("0x").optional(),
-  signature: z.string().startsWith("0x").optional(),
+
+  // accept null/undefined/""
+  v: zNullishToUndef(z.union([z.number(), z.string()])),
+  r: zNullishToUndef(zHex32),
+  s: zNullishToUndef(zHex32),
+  signature: zNullishToUndef(zHexSig),
 });
 
 const BuySchema = z.object({
-  user: z.string(),
+  user: zStringAddr,
   ozWei: z.union([z.string(), z.number(), z.bigint()]),
   deadline: z.union([z.string(), z.number()]),
-  v: z.union([z.number(), z.string()]).optional(),
-  r: z.string().startsWith("0x").optional(),
-  s: z.string().startsWith("0x").optional(),
-  signature: z.string().startsWith("0x").optional(),
+
+  v: zNullishToUndef(z.union([z.number(), z.string()])),
+  r: zNullishToUndef(zHex32),
+  s: zNullishToUndef(zHex32),
+  signature: zNullishToUndef(zHexSig),
 });
 
 const BuyPermitSchema = z.object({
-  user: z.string(),
+  user: zStringAddr,
   ozWei: z.union([z.string(), z.number(), z.bigint()]),
 
   buyDeadline: z.union([z.string(), z.number()]),
-  buyV: z.union([z.number(), z.string()]).optional(),
-  buyR: z.string().startsWith("0x").optional(),
-  buyS: z.string().startsWith("0x").optional(),
-  buySignature: z.string().startsWith("0x").optional(),
+  buyV: zNullishToUndef(z.union([z.number(), z.string()])),
+  buyR: zNullishToUndef(zHex32),
+  buyS: zNullishToUndef(zHex32),
+  buySignature: zNullishToUndef(zHexSig),
 
   permitValue: z.union([z.string(), z.number(), z.bigint()]),
   permitDeadline: z.union([z.string(), z.number()]),
-  permitV: z.union([z.number(), z.string()]).optional(),
-  permitR: z.string().startsWith("0x").optional(),
-  permitS: z.string().startsWith("0x").optional(),
-  permitSignature: z.string().startsWith("0x").optional(),
+  permitV: zNullishToUndef(z.union([z.number(), z.string()])),
+  permitR: zNullishToUndef(zHex32),
+  permitS: zNullishToUndef(zHex32),
+  permitSignature: zNullishToUndef(zHexSig),
 });
 
 // --------------------
@@ -365,9 +392,16 @@ function toIntStringSafe(v: any): string {
   return "0";
 }
 
+function cleanSigHex(input: any): string {
+  // handles weird quotes or accidental whitespace
+  const s = String(input ?? "").trim().replace(/^"+|"+$/g, "").replace(/\s+/g, "");
+  return s;
+}
+
 function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = String(sig64 || "");
-  if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature");
+  const hex = cleanSigHex(sig64);
+  // 64 bytes = 128 hex chars after 0x => total length 130
+  if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature (EIP-2098)");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
   const vsBig = BigInt("0x" + hex.slice(66));
@@ -382,7 +416,8 @@ function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${st
 }
 
 function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = String(sig65 || "");
+  const hex = cleanSigHex(sig65);
+  // 65 bytes = 130 hex after 0x => total length 132
   if (!/^0x[0-9a-fA-F]{130}$/.test(hex)) throw new Error("Invalid 65-byte signature");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
@@ -392,13 +427,17 @@ function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
+// Some wallets/providers produce a 66-byte (132 hex) signature blob.
+// We treat it as r(32) + s(32) + v(1) + extra(1) OR r+s+vLastByte.
+// Our safest approach: take r+s from first 64 bytes and v from LAST byte.
 function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = String(sig66 || "");
+  const hex = cleanSigHex(sig66);
+  // 66 bytes = 132 hex after 0x => total length 134
   if (!/^0x[0-9a-fA-F]{132}$/.test(hex)) throw new Error("Invalid 66-byte signature");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
   const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
-  const vLastByte = parseInt(hex.slice(132 - 2, 132), 16);
+  const vLastByte = parseInt(hex.slice(132, 134), 16); // last byte
   const v = normalizeV(vLastByte);
   return { v, r, s };
 }
@@ -409,37 +448,60 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
   const sKey = prefix ? `${prefix}S` : "s";
   const sigKey = prefix ? `${prefix}Signature` : "signature";
 
-  if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
-    const vNumRaw = Number(body[vKey]);
+  // Prefer explicit v/r/s if all present and valid (even if signature also present)
+  const vVal = body?.[vKey];
+  const rVal = body?.[rKey];
+  const sVal = body?.[sKey];
+
+  if (vVal != null && rVal != null && sVal != null) {
+    const vNumRaw = Number(vVal);
     if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
     const vNum = normalizeV(vNumRaw);
 
-    const r = body[rKey] as `0x${string}`;
-    const s = body[sKey] as `0x${string}`;
-    if (typeof r !== "string" || !r.startsWith("0x") || r.length !== 66) throw new Error(`Invalid ${rKey}`);
-    if (typeof s !== "string" || !s.startsWith("0x") || s.length !== 66) throw new Error(`Invalid ${sKey}`);
+    const r = cleanSigHex(rVal) as `0x${string}`;
+    const s = cleanSigHex(sVal) as `0x${string}`;
+
+    if (typeof r !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(r.slice(0, 66))) throw new Error(`Invalid ${rKey}`);
+    if (typeof s !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(s.slice(0, 66))) throw new Error(`Invalid ${sKey}`);
+
+    // enforce exact bytes32
+    if (r.length !== 66) throw new Error(`Invalid ${rKey} length`);
+    if (s.length !== 66) throw new Error(`Invalid ${sKey} length`);
 
     return { v: vNum, r, s };
   }
 
-  if (body?.[sigKey]) {
-    const sigHex = String(body[sigKey] || "").trim();
+  // Fall back to full signature parsing
+  const sigRaw = body?.[sigKey];
+  if (sigRaw) {
+    const sigHex = cleanSigHex(sigRaw);
 
     if (!sigHex || sigHex === "0x") {
-      throw new Error(`${sigKey}: Signature missing/blocked (empty). Try again and approve the signature prompt.`);
+      throw new Error(`${sigKey}: Signature missing/blocked (empty). Approve the signature prompt and try again.`);
     }
-    if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
 
+    // Hard reject non-hex (this is where the 450/1986-char garbage gets caught)
+    if (!sigHex.startsWith("0x")) {
+      throw new Error(`${sigKey}: not hex (missing 0x).`);
+    }
+    if (!/^0x[0-9a-fA-F]+$/.test(sigHex)) {
+      const hint = DEBUG_SIG ? ` got="${sigHex.slice(0, 24)}..." len=${sigHex.length}` : "";
+      throw new Error(`${sigKey}: not valid hex.${hint}`);
+    }
+
+    // 64-byte compact
     if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
+    // 65-byte standard
     if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
+    // 66-byte oddball
     if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
 
     throw new Error(
-      `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
+      `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130 (64-byte compact), 132 (65-byte), or 134 (66-byte).`
     );
   }
 
-  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature`);
+  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature (provide signature OR v/r/s).`);
 }
 
 async function requireRelayerMatches() {
@@ -888,7 +950,6 @@ app.post("/relay/buy", async (req, res) => {
     });
 
     // ✅ IMPORTANT: do NOT directly mutate holders here.
-    // Sync will pick up the event and apply delta ONCE (and only if inserted).
     if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
       setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
@@ -935,7 +996,6 @@ app.post("/relay/buy-permit", async (req, res) => {
       ],
     });
 
-    // ✅ same: rely on sync to update holders safely
     if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
       setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
@@ -961,6 +1021,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);
   console.log(`Admin key: ${ADMIN_KEY ? "ON" : "OFF"}`);
+  console.log(`DEBUG_SIG: ${DEBUG_SIG ? "ON" : "OFF"}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
     initSyncCursorFromDb().then(() => {
