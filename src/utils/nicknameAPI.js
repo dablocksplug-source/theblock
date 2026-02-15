@@ -13,6 +13,7 @@ import {
   toHex,
   toBytes,
   recoverAddress,
+  hashMessage, // ✅ FIX: correct EIP-191 hashing
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -269,13 +270,12 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   }
 }
 
-// Verify signature matches buyer for the exact scheme used in Solidity:
+// Verify signature matches user for the exact scheme used in Solidity:
 // ethSigned = toEthSignedMessageHash(msgHash)
 async function assertSignatureMatchesUser({ user, msgHash, v, r, s }) {
-  // EIP-191 prefix with 32-byte msgHash
-  const ethSigned = keccak256(
-    encodeAbiParameters(parseAbiParameters("string,bytes32"), ["\x19Ethereum Signed Message:\n32", msgHash])
-  );
+  // ✅ FIX: correct EIP-191 hash of RAW 32-byte msgHash
+  // This matches Solidity MessageHashUtils.toEthSignedMessageHash(bytes32)
+  const ethSigned = hashMessage({ message: { raw: msgHash } });
 
   const recovered = await recoverAddress({ hash: ethSigned, signature: { v, r, s } });
   if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
