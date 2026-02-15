@@ -2,12 +2,13 @@
   "network": "baseSepolia",
   "chainId": 84532,
   "rpc": "https://base-sepolia.g.alchemy.com/v2/e8hqrtHhsnziVDKsd34vl",
-  "deployer": "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
+  "deployer": "0xb2b7438c699e5b2389a15094EBAF1640EB96cAEb",
   "contracts": {
     "MockUSDC": "0xbefe908a855ef8a5cde63c0e1729fac443035837",
     "OZToken": "0xab48da141b44aeb9bc5dc3cb0ff2982f1c615830",
     "BlockSwap": "0xa69111d06b627c2871ad4ad9351223dac2c2e39c",
-    "BlockRewardsMerkle": "0x119ae679658ae85e74c5b4cec3cae89a5455b30f"
+    "BlockRewardsMerkle": "0x119ae679658ae85e74c5b4cec3cae89a5455b30f",
+    "NicknameRegistryRelayed": "0x85459f66066562f84eeac0ebaa5c1695c9a58a46"
   },
   "params": {
     "reserve": "0x49d118023e6bCeB0E7c4e5b7925637563A0b9805",
@@ -20,6 +21,7 @@
     "saleInventory": "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
     "seeded": "true",
     "startPaused": "true",
-    "owner": "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c"
+    "owner": "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
+    "nicknameRelayer": "0xdc78328cB95AB30C03e9c13E2bf68e531F17A43A"
   }
 }

@@ -3,13 +3,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { z } from "zod";
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  isAddress,
-  parseAbiItem,
-} from "viem";
+import { createPublicClient, createWalletClient, http, isAddress, parseAbiItem } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -28,9 +22,7 @@ const RPC_URL_LOGS = (ENV.RPC_URL_LOGS || ENV.LOGS_RPC_URL || "").trim(); // opt
 const RELAYER_PRIVATE_KEY = (ENV.RELAYER_PRIVATE_KEY || "").trim() as `0x${string}`;
 
 const BLOCKSWAP_ADDRESS = (ENV.BLOCKSWAP_ADDRESS || "").trim() as `0x${string}`;
-const NICKNAME_REGISTRY_ADDRESS = (ENV.NICKNAME_REGISTRY_ADDRESS || "").trim() as
-  | `0x${string}`
-  | "";
+const NICKNAME_REGISTRY_ADDRESS = (ENV.NICKNAME_REGISTRY_ADDRESS || "").trim() as `0x${string}` | "";
 const UI_ORIGIN = (ENV.UI_ORIGIN || "").trim();
 
 // Supabase (server-side)
@@ -56,9 +48,6 @@ const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 
 // optional admin key for /admin/sync-now
 const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
-
-// optional debug flag for signature parsing messages
-const DEBUG_SIG = String(ENV.DEBUG_SIG || "").trim() === "1";
 
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
@@ -277,62 +266,52 @@ function zodMsg(e: any) {
 }
 
 // --------------------
-// schemas (BULLETPROOF: allow nulls from mobile wallets / sloppy clients)
+// schemas (COERCE EVERYTHING SAFELY)
 // --------------------
-const zNullishToUndef = <T extends z.ZodTypeAny>(inner: T) =>
-  z.preprocess((v) => (v === null || v === undefined || v === "" ? undefined : v), inner.optional());
-
-const zStringAddr = z.string().refine((v) => isAddress(v), "Invalid address");
-
-const zHex32 = z
-  .string()
-  .startsWith("0x")
-  .refine((v) => /^0x[0-9a-fA-F]{64}$/.test(v), "Invalid bytes32 hex");
-
-const zHexSig = z
-  .string()
-  .startsWith("0x")
-  .refine((v) => /^0x[0-9a-fA-F]+$/.test(v), "Signature must be hex");
+const zAnyString = z.preprocess((v) => (v == null ? undefined : String(v)), z.string());
+const zAnyOptionalString = z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional());
+const zAnyOptionalNumber = z.preprocess((v) => {
+  if (v == null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : v;
+}, z.union([z.number(), z.string()]).optional());
 
 const NicknameSchema = z.object({
-  user: zStringAddr,
-  nick: z.string().min(3).max(24),
-  deadline: z.union([z.string(), z.number()]),
-
-  // accept null/undefined/""
-  v: zNullishToUndef(z.union([z.number(), z.string()])),
-  r: zNullishToUndef(zHex32),
-  s: zNullishToUndef(zHex32),
-  signature: zNullishToUndef(zHexSig),
+  user: zAnyString,
+  nick: zAnyString,
+  deadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
+  v: zAnyOptionalNumber,
+  r: zAnyOptionalString,
+  s: zAnyOptionalString,
+  signature: z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional()),
 });
 
 const BuySchema = z.object({
-  user: zStringAddr,
-  ozWei: z.union([z.string(), z.number(), z.bigint()]),
-  deadline: z.union([z.string(), z.number()]),
-
-  v: zNullishToUndef(z.union([z.number(), z.string()])),
-  r: zNullishToUndef(zHex32),
-  s: zNullishToUndef(zHex32),
-  signature: zNullishToUndef(zHexSig),
+  user: zAnyString,
+  ozWei: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
+  deadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
+  v: zAnyOptionalNumber,
+  r: zAnyOptionalString,
+  s: zAnyOptionalString,
+  signature: z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional()),
 });
 
 const BuyPermitSchema = z.object({
-  user: zStringAddr,
-  ozWei: z.union([z.string(), z.number(), z.bigint()]),
+  user: zAnyString,
+  ozWei: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
 
-  buyDeadline: z.union([z.string(), z.number()]),
-  buyV: zNullishToUndef(z.union([z.number(), z.string()])),
-  buyR: zNullishToUndef(zHex32),
-  buyS: zNullishToUndef(zHex32),
-  buySignature: zNullishToUndef(zHexSig),
+  buyDeadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
+  buyV: zAnyOptionalNumber,
+  buyR: zAnyOptionalString,
+  buyS: zAnyOptionalString,
+  buySignature: z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional()),
 
-  permitValue: z.union([z.string(), z.number(), z.bigint()]),
-  permitDeadline: z.union([z.string(), z.number()]),
-  permitV: zNullishToUndef(z.union([z.number(), z.string()])),
-  permitR: zNullishToUndef(zHex32),
-  permitS: zNullishToUndef(zHex32),
-  permitSignature: zNullishToUndef(zHexSig),
+  permitValue: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
+  permitDeadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
+  permitV: zAnyOptionalNumber,
+  permitR: zAnyOptionalString,
+  permitS: zAnyOptionalString,
+  permitSignature: z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional()),
 });
 
 // --------------------
@@ -392,16 +371,15 @@ function toIntStringSafe(v: any): string {
   return "0";
 }
 
-function cleanSigHex(input: any): string {
-  // handles weird quotes or accidental whitespace
-  const s = String(input ?? "").trim().replace(/^"+|"+$/g, "").replace(/\s+/g, "");
-  return s;
-}
-
+// --- signature parsing ---
+// We accept: {v,r,s} OR signature string
+// signature string formats:
+// - 64-byte compact EIP-2098: 0x + 128 hex (len 130 chars total)
+// - 65-byte: 0x + 130 hex (len 132 chars total)
+// - "weird" 66-byte: 0x + 132 hex (len 134 chars total) -> use last byte as v
 function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = cleanSigHex(sig64);
-  // 64 bytes = 128 hex chars after 0x => total length 130
-  if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature (EIP-2098)");
+  const hex = String(sig64 || "").trim();
+  if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
   const vsBig = BigInt("0x" + hex.slice(66));
@@ -416,8 +394,7 @@ function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${st
 }
 
 function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = cleanSigHex(sig65);
-  // 65 bytes = 130 hex after 0x => total length 132
+  const hex = String(sig65 || "").trim();
   if (!/^0x[0-9a-fA-F]{130}$/.test(hex)) throw new Error("Invalid 65-byte signature");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
@@ -427,18 +404,14 @@ function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
-// Some wallets/providers produce a 66-byte (132 hex) signature blob.
-// We treat it as r(32) + s(32) + v(1) + extra(1) OR r+s+vLastByte.
-// Our safest approach: take r+s from first 64 bytes and v from LAST byte.
 function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = cleanSigHex(sig66);
-  // 66 bytes = 132 hex after 0x => total length 134
+  const hex = String(sig66 || "").trim();
   if (!/^0x[0-9a-fA-F]{132}$/.test(hex)) throw new Error("Invalid 66-byte signature");
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
   const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
-  const vLastByte = parseInt(hex.slice(132, 134), 16); // last byte
-  const v = normalizeV(vLastByte);
+  const vRaw = parseInt(hex.slice(132 - 2, 132), 16);
+  const v = normalizeV(vRaw);
   return { v, r, s };
 }
 
@@ -448,60 +421,39 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
   const sKey = prefix ? `${prefix}S` : "s";
   const sigKey = prefix ? `${prefix}Signature` : "signature";
 
-  // Prefer explicit v/r/s if all present and valid (even if signature also present)
-  const vVal = body?.[vKey];
-  const rVal = body?.[rKey];
-  const sVal = body?.[sKey];
-
-  if (vVal != null && rVal != null && sVal != null) {
-    const vNumRaw = Number(vVal);
+  // Prefer explicit v/r/s if present
+  if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
+    const vNumRaw = Number(body[vKey]);
     if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
     const vNum = normalizeV(vNumRaw);
 
-    const r = cleanSigHex(rVal) as `0x${string}`;
-    const s = cleanSigHex(sVal) as `0x${string}`;
-
-    if (typeof r !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(r.slice(0, 66))) throw new Error(`Invalid ${rKey}`);
-    if (typeof s !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(s.slice(0, 66))) throw new Error(`Invalid ${sKey}`);
-
-    // enforce exact bytes32
-    if (r.length !== 66) throw new Error(`Invalid ${rKey} length`);
-    if (s.length !== 66) throw new Error(`Invalid ${sKey} length`);
+    const r = String(body[rKey]).trim() as `0x${string}`;
+    const s = String(body[sKey]).trim() as `0x${string}`;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(r.slice(2))) throw new Error(`Invalid ${rKey}`);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(s.slice(2))) throw new Error(`Invalid ${sKey}`);
 
     return { v: vNum, r, s };
   }
 
-  // Fall back to full signature parsing
-  const sigRaw = body?.[sigKey];
-  if (sigRaw) {
-    const sigHex = cleanSigHex(sigRaw);
+  // Otherwise signature hex
+  const sigHex = body?.[sigKey] != null ? String(body[sigKey]).trim().replace(/^"+|"+$/g, "") : "";
 
-    if (!sigHex || sigHex === "0x") {
-      throw new Error(`${sigKey}: Signature missing/blocked (empty). Approve the signature prompt and try again.`);
-    }
-
-    // Hard reject non-hex (this is where the 450/1986-char garbage gets caught)
-    if (!sigHex.startsWith("0x")) {
-      throw new Error(`${sigKey}: not hex (missing 0x).`);
-    }
-    if (!/^0x[0-9a-fA-F]+$/.test(sigHex)) {
-      const hint = DEBUG_SIG ? ` got="${sigHex.slice(0, 24)}..." len=${sigHex.length}` : "";
-      throw new Error(`${sigKey}: not valid hex.${hint}`);
-    }
-
-    // 64-byte compact
-    if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
-    // 65-byte standard
-    if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
-    // 66-byte oddball
-    if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
-
+  if (!sigHex || sigHex === "0x") {
     throw new Error(
-      `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130 (64-byte compact), 132 (65-byte), or 134 (66-byte).`
+      `${sigKey}: Signature missing/blocked (empty). Approve the signature prompt in the wallet and try again.`
     );
   }
+  if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
+  if (!/^0x[0-9a-fA-F]+$/.test(sigHex)) throw new Error(`Invalid ${sigKey}: not hex`);
 
-  throw new Error(`Missing ${prefix ? prefix + " " : ""}signature (provide signature OR v/r/s).`);
+  // compact / normal / weird
+  if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
+  if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
+  if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
+
+  throw new Error(
+    `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
+  );
 }
 
 async function requireRelayerMatches() {
@@ -531,9 +483,6 @@ async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promi
 // --------------------
 // Supabase upserts
 // --------------------
-
-// ✅ CHANGE: return whether the event was truly inserted.
-// If it's a duplicate, return false so we DO NOT apply holder deltas again.
 async function supaInsertEvent(row: any): Promise<boolean> {
   if (!supabase) return false;
   try {
@@ -551,7 +500,6 @@ async function supaInsertEvent(row: any): Promise<boolean> {
 
     if (error) {
       const msg = String((error as any).message || "").toLowerCase();
-      // ✅ duplicates are expected when we lookback; treat as NOT inserted
       if (msg.includes("duplicate") || msg.includes("unique") || msg.includes("conflict")) return false;
       console.warn("[supa] insert event error:", (error as any).message);
       return false;
@@ -627,7 +575,6 @@ let __syncLastRunAt: string | null = null;
 let __syncLastOkAt: string | null = null;
 let __syncLastError: string | null = null;
 
-// ✅ NEW: initialize cursor from Supabase so redeploys don't re-walk forever
 async function initSyncCursorFromDb() {
   if (!supabase) return;
 
@@ -906,10 +853,12 @@ app.post("/relay/nickname", async (req, res) => {
     const body = NicknameSchema.parse(req.body);
 
     const user = mustAddress(body.user, "user");
-    const deadline = mustUintSeconds(body.deadline, "deadline");
+    const deadline = mustUintSeconds(body.deadline as any, "deadline");
     if (deadline < nowSec()) throw new Error("Expired deadline");
 
     const nick = String(body.nick || "").trim();
+    if (nick.length < 3 || nick.length > 24) throw new Error("nick must be 3-24 chars");
+
     const { v, r, s } = parseSig(body);
 
     const hash = await walletClient.writeContract({
@@ -935,7 +884,7 @@ app.post("/relay/buy", async (req, res) => {
 
     const user = mustAddress(body.user, "user");
     const ozWei = mustUint(body.ozWei, "ozWei");
-    const deadline = mustUintSeconds(body.deadline, "deadline");
+    const deadline = mustUintSeconds(body.deadline as any, "deadline");
     if (deadline < nowSec()) throw new Error("Expired deadline");
 
     await requireRelayerMatches();
@@ -949,7 +898,6 @@ app.post("/relay/buy", async (req, res) => {
       args: [user, ozWei, deadline, v, r, s],
     });
 
-    // ✅ IMPORTANT: do NOT directly mutate holders here.
     if (ENABLE_CHAIN_SYNC && hasSupabase() && SYNC_ON_RELAY) {
       setTimeout(() => syncFromChain({ lookbackBlocks: 1200 }).catch(() => {}), SYNC_ON_RELAY_DELAY_MS);
     }
@@ -1021,7 +969,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);
   console.log(`Admin key: ${ADMIN_KEY ? "ON" : "OFF"}`);
-  console.log(`DEBUG_SIG: ${DEBUG_SIG ? "ON" : "OFF"}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
     initSyncCursorFromDb().then(() => {
