@@ -2,6 +2,8 @@
 import { BLOCKSWAP_CONFIG as C } from "../config/blockswap.config";
 import {
   createPublicClient,
+  createWalletClient,
+  custom,
   http,
   isAddress,
   keccak256,
@@ -193,12 +195,27 @@ function assertSigLen(label, sig) {
   return s;
 }
 
-// personal_sign helper (wallets differ on ordering)
-async function personalSign(provider, msgHash, user) {
+// -------------------------------
+// ✅ Coinbase mobile fix:
+// Prefer viem signMessage({ raw }) so wallets sign BYTES, not "0x..." TEXT.
+// Fallback to personal_sign if needed.
+// -------------------------------
+async function signRawHash({ provider, chain, account, msgHash }) {
+  // 1) best path: walletClient.signMessage(raw)
   try {
-    return await provider.request({ method: "personal_sign", params: [msgHash, user] });
+    const wc = createWalletClient({ chain, transport: custom(provider) });
+    const sig = await wc.signMessage({
+      account,
+      message: { raw: msgHash },
+    });
+    return sig;
   } catch {
-    return await provider.request({ method: "personal_sign", params: [user, msgHash] });
+    // 2) fallback: personal_sign (different param orderings)
+    try {
+      return await provider.request({ method: "personal_sign", params: [msgHash, account] });
+    } catch {
+      return await provider.request({ method: "personal_sign", params: [account, msgHash] });
+    }
   }
 }
 
@@ -226,7 +243,7 @@ export async function getNickname(walletAddress) {
 
 /**
  * Gasless nickname (relayer pays gas)
- * ✅ Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC) to avoid signer mismatch.
+ * ✅ Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC).
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
@@ -278,8 +295,8 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     chainId: Number(C.CHAIN_ID),
   });
 
-  // Sign raw 32-byte hash (contract uses toEthSignedMessageHash(msgHash))
-  const rawSig = await personalSign(provider, msgHash, user);
+  // ✅ Sign raw 32-byte hash (Coinbase mobile-safe)
+  const rawSig = await signRawHash({ provider, chain, account: user, msgHash });
 
   // ✅ STRICT normalize + expand compact signature
   const signature = assertSigLen("nicknameSignature", rawSig);

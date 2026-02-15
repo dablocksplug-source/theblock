@@ -416,7 +416,25 @@ function assertSigLen(label, sig) {
   return s;
 }
 
-// personal_sign helper (wallets differ on param ordering)
+// -------------------------------
+// ✅ Coinbase mobile fix:
+// Prefer walletClient.signMessage({ raw }) so it signs BYTES not "0x..." TEXT.
+// Fallback to personal_sign if needed.
+// -------------------------------
+async function signRawHash({ provider, chain, account, msgHash }) {
+  try {
+    const wc = createWalletClient({ chain, transport: custom(provider) });
+    return await wc.signMessage({ account, message: { raw: msgHash } });
+  } catch {
+    try {
+      return await provider.request({ method: "personal_sign", params: [msgHash, account] });
+    } catch {
+      return await provider.request({ method: "personal_sign", params: [account, msgHash] });
+    }
+  }
+}
+
+// personal_sign helper (kept for compatibility; used only as fallback path)
 async function personalSign(provider, msgHash, user) {
   try {
     return await provider.request({ method: "personal_sign", params: [msgHash, user] });
@@ -611,7 +629,11 @@ export const blockswapAdapter = {
     const pc = this._publicClient();
     const wc = this._walletClient();
 
-    const inv = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) buy");
+    const inv = await safeRead(
+      pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
+      0n,
+      "OZ.balanceOf(SWAP) buy"
+    );
 
     if (inv < ozWei) {
       throw new Error(`Swap is out of inventory. OZ in contract: ${formatUnits(inv, 18)} (need ${formatUnits(ozWei, 18)}).`);
@@ -751,9 +773,21 @@ export const blockswapAdapter = {
       chainId: Number(C.CHAIN_ID),
     });
 
-    // ✅ Use ACTIVE provider for personal_sign
+    // ✅ Coinbase mobile-safe buy signature:
+    // Prefer walletClient.signMessage({ raw }) first.
+    const chain = chainFromConfig();
     const eip1193 = mustProvider();
-    const rawBuySig = await personalSign(eip1193, msgHash, walletAddress);
+    const wc = this._walletClient();
+
+    let rawBuySig;
+    try {
+      rawBuySig = await wc.signMessage({
+        account: walletAddress,
+        message: { raw: msgHash },
+      });
+    } catch {
+      rawBuySig = await personalSign(eip1193, msgHash, walletAddress);
+    }
 
     const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
     const domain = {
@@ -781,7 +815,6 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
-    const wc = this._walletClient();
     const rawPermitSig = await wc.signTypedData({
       account: walletAddress,
       domain,
