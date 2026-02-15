@@ -344,30 +344,22 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (STRICT)
-// - Rejects non-hex (prevents 450/1986 char garbage)
-// - Accepts 64/65/66 byte formats (130/132/134 chars)
+// SIGNATURE NORMALIZATION (COINBASE MOBILE SAFE)
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
-function normalizeSigHexStrict(sig) {
-  if (typeof sig === "string") {
-    const t = sig.trim().replace(/^"+|"+$/g, "");
-    if (!t || t === "0x") throw new Error("Signature missing/blocked (empty).");
-    if (!t.startsWith("0x")) throw new Error("Signature is not hex (missing 0x).");
-    if (!isHexOnly(t)) throw new Error("Signature is not valid hex.");
-    return t;
-  }
+function extractHexSigFromAny(raw) {
+  if (raw && typeof raw === "object") {
+    if (raw.signature) return extractHexSigFromAny(raw.signature);
+    if (raw.result) return extractHexSigFromAny(raw.result);
+    if (raw.data) return extractHexSigFromAny(raw.data);
 
-  if (sig && typeof sig === "object") {
-    if (sig.signature) return normalizeSigHexStrict(sig.signature);
-
-    const r = sig.r || sig.R;
-    const s = sig.s || sig.S;
-    const v = sig.v ?? sig.V;
-    const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
+    const r = raw.r || raw.R;
+    const s = raw.s || raw.S;
+    const v = raw.v ?? raw.V;
+    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
 
     if (r && s && (v != null || yParity != null)) {
       const hex = signatureToHex({
@@ -376,22 +368,41 @@ function normalizeSigHexStrict(sig) {
         ...(v != null ? { v: Number(v) } : {}),
         ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
       });
-      return normalizeSigHexStrict(hex);
+      return extractHexSigFromAny(hex);
     }
+
+    raw = JSON.stringify(raw);
   }
 
-  throw new Error("Signature returned in an unsupported format.");
+  const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
+  if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
+
+  if (isHexOnly(s) && (s.length === 130 || s.length === 132)) return s;
+
+  const m65 = s.match(/0x[0-9a-fA-F]{130}/);
+  if (m65?.[0]) return m65[0];
+
+  const m64 = s.match(/0x[0-9a-fA-F]{128}/);
+  if (m64?.[0]) return m64[0];
+
+  const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
+  if (mAny?.[0]) {
+    const h = mAny[0];
+    if (h.length >= 132) return h.slice(0, 132);
+    if (h.length >= 130) return h.slice(0, 130);
+  }
+
+  throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
 }
 
-function expandCompactSig(sigHex) {
-  const s = normalizeSigHexStrict(sigHex);
+function expandCompactSig(sigLike) {
+  const s = extractHexSigFromAny(sigLike);
 
-  // 65-byte
   if (s.length === 132) return s;
-  // 66-byte (some providers)
-  if (s.length === 134) return s;
-  // 64-byte compact
-  if (s.length !== 130) throw new Error(`Invalid signature length: ${s.length} (expected 130/132/134).`);
+
+  if (s.length !== 130) {
+    throw new Error(`Invalid signature length: ${s.length} (expected 130 compact or 132 full).`);
+  }
 
   const r = s.slice(2, 66);
   const vs = s.slice(66);
@@ -400,20 +411,18 @@ function expandCompactSig(sigHex) {
   const v = (vsFirstByte & 0x80) ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
-  const sRest = vs.slice(2);
-  const sFixed = sFirstByte + sRest;
+  const sFixed = sFirstByte + vs.slice(2);
 
   const vHex = v.toString(16).padStart(2, "0");
   return `0x${r}${sFixed}${vHex}`;
 }
 
-function assertSigLen(label, sig) {
-  const s = expandCompactSig(sig);
-  if (!isHexOnly(s)) throw new Error(`${label} invalid hex.`);
-  if (s.length !== 130 && s.length !== 132 && s.length !== 134) {
-    throw new Error(`${label} invalid length: ${s.length} (expected 130/132/134).`);
+function assertSig(label, sigLike) {
+  const full = expandCompactSig(sigLike);
+  if (!isHexOnly(full) || full.length !== 132) {
+    throw new Error(`${label} invalid after normalization (len=${String(full || "").length}).`);
   }
-  return s;
+  return full;
 }
 
 // -------------------------------
@@ -824,8 +833,9 @@ export const blockswapAdapter = {
     });
 
     // ✅ STRICT normalize + expand compact signatures BEFORE posting
-    const buySignature = assertSigLen("buySignature", rawBuySig);
-    const permitSignature = assertSigLen("permitSignature", rawPermitSig);
+   const buySignature = assertSig("buySignature", rawBuySig);
+const permitSignature = assertSig("permitSignature", rawPermitSig);
+
 
     const endpoint = `${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`;
 

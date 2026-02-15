@@ -117,32 +117,30 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (STRICT)
-// - Rejects non-hex (prevents 450/1986 char garbage)
-// - Accepts 64/65/66 byte formats (130/132/134 chars)
+// SIGNATURE NORMALIZATION (COINBASE MOBILE SAFE)
+// Coinbase mobile sometimes returns a long string / wrapped payload.
+// We extract the first valid 64/65-byte hex signature from ANY response.
+// Accepts:
+// - 0x + 128 hex (64-byte compact)
+// - 0x + 130 hex (65-byte)
+// If a longer payload contains a signature inside, we pull it out.
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
-function normalizeSigHexStrict(sig) {
-  // Accept: string OR {signature} OR {r,s,v} objects
-  if (typeof sig === "string") {
-    const t = sig.trim().replace(/^"+|"+$/g, "");
-    if (!t || t === "0x") throw new Error("Signature missing (wallet popup likely blocked).");
-    if (!t.startsWith("0x")) throw new Error("Signature is not hex (missing 0x).");
-    if (!isHexOnly(t)) throw new Error("Signature is not valid hex.");
-    return t;
-  }
+function extractHexSigFromAny(raw) {
+  // If object, unwrap common fields first
+  if (raw && typeof raw === "object") {
+    if (raw.signature) return extractHexSigFromAny(raw.signature);
+    if (raw.result) return extractHexSigFromAny(raw.result);
+    if (raw.data) return extractHexSigFromAny(raw.data);
 
-  if (sig && typeof sig === "object") {
-    if (sig.signature) return normalizeSigHexStrict(sig.signature);
-
-    const r = sig.r || sig.R;
-    const s = sig.s || sig.S;
-    const v = sig.v ?? sig.V;
-    const yParity = sig.yParity ?? sig.y_parity ?? sig.parity;
-
+    // r/s/v style
+    const r = raw.r || raw.R;
+    const s = raw.s || raw.S;
+    const v = raw.v ?? raw.V;
+    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
     if (r && s && (v != null || yParity != null)) {
       const hex = signatureToHex({
         r,
@@ -150,26 +148,49 @@ function normalizeSigHexStrict(sig) {
         ...(v != null ? { v: Number(v) } : {}),
         ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
       });
-      return normalizeSigHexStrict(hex);
+      return extractHexSigFromAny(hex);
     }
+
+    // fallback stringify
+    raw = JSON.stringify(raw);
   }
 
-  throw new Error("Signature returned in an unsupported format.");
+  const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
+  if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
+
+  // If it's already clean hex and near the right size, keep it.
+  if (isHexOnly(s) && (s.length === 130 || s.length === 132)) return s;
+
+  // Otherwise: find embedded signatures inside the payload.
+  // Prefer 65-byte (130 hex chars after 0x) first, then compact 64-byte.
+  const m65 = s.match(/0x[0-9a-fA-F]{130}/);
+  if (m65?.[0]) return m65[0];
+
+  const m64 = s.match(/0x[0-9a-fA-F]{128}/);
+  if (m64?.[0]) return m64[0];
+
+  // Some wallets include a longer hex blob; try to carve from it.
+  const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
+  if (mAny?.[0]) {
+    const h = mAny[0];
+    // if it contains enough for 65-byte, slice it
+    if (h.length >= 132) return h.slice(0, 132);
+    if (h.length >= 130) return h.slice(0, 130);
+  }
+
+  throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature from response (len=${s.length}).`);
 }
 
 // Expand EIP-2098 compact signature (64 bytes) => 65 bytes
-function expandCompactSig(sigHex) {
-  const s = normalizeSigHexStrict(sigHex);
+function expandCompactSig(sigLike) {
+  const s = extractHexSigFromAny(sigLike);
 
   // 65-byte (0x + 130 hex)
   if (s.length === 132) return s;
 
-  // 66-byte (0x + 132 hex) keep (some wallets return this)
-  if (s.length === 134) return s;
-
   // 64-byte compact (0x + 128 hex)
   if (s.length !== 130) {
-    throw new Error(`Invalid signature length: ${s.length} (expected 130/132/134).`);
+    throw new Error(`Invalid signature length: ${s.length} (expected 130 compact or 132 full).`);
   }
 
   const r = s.slice(2, 66);
@@ -179,20 +200,18 @@ function expandCompactSig(sigHex) {
   const v = (vsFirstByte & 0x80) ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
-  const sRest = vs.slice(2);
-  const sFixed = sFirstByte + sRest;
+  const sFixed = sFirstByte + vs.slice(2);
 
   const vHex = v.toString(16).padStart(2, "0");
   return `0x${r}${sFixed}${vHex}`;
 }
 
-function assertSigLen(label, sig) {
-  const s = expandCompactSig(sig);
-  if (!isHexOnly(s)) throw new Error(`${label} invalid hex.`);
-  if (s.length !== 130 && s.length !== 132 && s.length !== 134) {
-    throw new Error(`${label} invalid length: ${s.length} (expected 130/132/134).`);
+function assertSig(label, sigLike) {
+  const full = expandCompactSig(sigLike);
+  if (!isHexOnly(full) || full.length !== 132) {
+    throw new Error(`${label} invalid after normalization (len=${String(full || "").length}).`);
   }
-  return s;
+  return full;
 }
 
 // -------------------------------
@@ -299,7 +318,8 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const rawSig = await signRawHash({ provider, chain, account: user, msgHash });
 
   // ✅ STRICT normalize + expand compact signature
-  const signature = assertSigLen("nicknameSignature", rawSig);
+ const signature = assertSig("nicknameSignature", rawSig);
+
 
   // Relayer may verify either signature hex or v/r/s — we send BOTH
   const sigObj = hexToSignature(signature);
