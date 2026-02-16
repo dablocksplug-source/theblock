@@ -13,12 +13,15 @@ import {
   toHex,
   toBytes,
   recoverAddress,
-  hashMessage, // ✅ FIX: correct EIP-191 hashing
+  hashMessage, // EIP-191 hash
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
 function sanitizeUrl(u) {
-  return String(u || "").trim().replace(/^"+|"+$/g, "").replace(/\s+/g, "");
+  return String(u || "")
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .replace(/\s+/g, "");
 }
 
 function chainFromConfig() {
@@ -104,10 +107,7 @@ async function resolveRegistryAddress() {
  *  ))
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
-  // Solidity: keccak256("NICKNAME_SET")
   const tag = keccak256(toHex("NICKNAME_SET"));
-
-  // Solidity: keccak256(bytes(nick))
   const nickHash = keccak256(toBytes(String(nick || "")));
 
   return keccak256(
@@ -119,15 +119,11 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (COINBASE MOBILE SAFE)
+// SIGNATURE NORMALIZATION (MATCH RELAYER)
+// Relayer accepts signature lengths: 64-byte (130 chars) OR 65-byte (132 chars).
+// It does NOT accept 66-byte (134) as a "signature" string.
 //
-// Accepts / extracts:
-// - 64-byte compact: 0x + 128 hex (len=130 chars)
-// - 65-byte:        0x + 130 hex (len=132 chars)
-// - 66-byte:        0x + 132 hex (len=134 chars)  ✅ coinbase mobile sometimes
-//
-// Also handles wrapped payloads (stringified objects / long strings)
-// by extracting the first embedded signature.
+// So: we ALWAYS convert everything to a 65-byte signature string.
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -161,7 +157,7 @@ function extractHexSigFromAny(raw) {
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
-  // already clean
+  // already clean (64/65/66)
   if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
 
   // extract embedded (prefer 66 > 65 > 64)
@@ -186,11 +182,11 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature from response (len=${s.length}).`);
 }
 
-// EIP-2098 expand: 64-byte compact -> 65-byte
+// Convert EIP-2098 64-byte => 65-byte
 function expandEip2098(sig64_hex) {
-  const s = sig64_hex; // already 0x + 128 hex
+  const s = sig64_hex; // 0x + 128 hex
   const r = s.slice(2, 66);
-  const vs = s.slice(66); // 64 hex
+  const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
   const v = (vsFirstByte & 0x80) ? 28 : 27;
@@ -199,10 +195,21 @@ function expandEip2098(sig64_hex) {
   const sFixed = sFirstByte + vs.slice(2);
 
   const vHex = v.toString(16).padStart(2, "0");
-  return `0x${r}${sFixed}${vHex}`; // 65-byte
+  return `0x${r}${sFixed}${vHex}`; // 65-byte (132 chars)
 }
 
-// Decode 65-byte 0x + 130 hex
+// If we ever receive a 66-byte (134 chars), we reconstruct a real 65-byte from r/s + v(last byte)
+function shrink66To65(sig66) {
+  // sig66 is 0x + 132 hex (134 chars)
+  const hex = sig66;
+  const r = hex.slice(2, 66);
+  const s = hex.slice(66, 130);
+  const vRaw = parseInt(hex.slice(132, 134), 16);
+  const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
+  const vHex = Number(v).toString(16).padStart(2, "0");
+  return `0x${r}${s}${vHex}`; // 65-byte (132 chars)
+}
+
 function decode65(sig65) {
   const hex = sig65;
   const r = `0x${hex.slice(2, 66)}`;
@@ -212,24 +219,15 @@ function decode65(sig65) {
   return { v: Number(v), r, s };
 }
 
-// Decode 66-byte 0x + 132 hex (coinbase mobile weirdness)
-// We'll take r(32), s(32), and v as the *last byte*.
-function decode66(sig66) {
-  const hex = sig66;
-  const r = `0x${hex.slice(2, 66)}`;
-  const s = `0x${hex.slice(66, 130)}`;
-  const vRaw = parseInt(hex.slice(132, 134), 16);
-  const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
-  return { v: Number(v), r, s };
-}
-
-// normalize any signature into {v,r,s} and a "safe" signature string
-function normalizeSig(sigLike) {
+// normalize any signature into:
+// - signature65: ALWAYS 65-byte hex string (132 chars total)
+// - v/r/s: decoded from that 65-byte
+function normalizeSigTo65(sigLike) {
   const extracted = extractHexSigFromAny(sigLike);
 
   // 64-byte compact
   if (extracted.length === 130) {
-    const sig65 = expandEip2098(extracted); // becomes 132 chars
+    const sig65 = expandEip2098(extracted);
     const { v, r, s } = decode65(sig65);
     return { signature: sig65, v, r, s };
   }
@@ -240,10 +238,11 @@ function normalizeSig(sigLike) {
     return { signature: extracted, v, r, s };
   }
 
-  // 66-byte (keep original string, but decode v/r/s ourselves)
+  // 66-byte -> FORCE to 65-byte for relayer compatibility
   if (extracted.length === 134) {
-    const { v, r, s } = decode66(extracted);
-    return { signature: extracted, v, r, s };
+    const sig65 = shrink66To65(extracted);
+    const { v, r, s } = decode65(sig65);
+    return { signature: sig65, v, r, s };
   }
 
   throw new Error(`Signature invalid length after extraction: ${extracted.length} (expected 130/132/134).`);
@@ -273,15 +272,15 @@ async function signRawHash({ provider, chain, account, msgHash }) {
 // Verify signature matches user for the exact scheme used in Solidity:
 // ethSigned = toEthSignedMessageHash(msgHash)
 async function assertSignatureMatchesUser({ user, msgHash, v, r, s }) {
-  // ✅ FIX: correct EIP-191 hash of RAW 32-byte msgHash
-  // This matches Solidity MessageHashUtils.toEthSignedMessageHash(bytes32)
+  // Correct EIP-191 hash of RAW 32-byte msgHash
+  // Matches Solidity MessageHashUtils.toEthSignedMessageHash(bytes32)
   const ethSigned = hashMessage({ message: { raw: msgHash } });
 
   const recovered = await recoverAddress({ hash: ethSigned, signature: { v, r, s } });
   if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
     throw new Error(
       `Bad signature (recovered ${recovered}). This wallet signed a DIFFERENT payload.\n` +
-        `Fix: reopen wallet prompt and approve signing (Coinbase mobile sometimes signs "0x..." as text).\n`
+        `Fix: reopen wallet prompt and approve signing. (Some wallets sign "0x..." as text in rare fallback paths.)\n`
     );
   }
 }
@@ -365,10 +364,10 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   // ✅ Sign raw 32-byte hash (Coinbase mobile-safe)
   const rawSig = await signRawHash({ provider, chain, account: user, msgHash });
 
-  // ✅ Normalize 64/65/66 -> {signature,v,r,s}
-  const { signature, v, r, s } = normalizeSig(rawSig);
+  // ✅ Normalize to 65-byte signature ONLY (relayer compatible)
+  const { signature, v, r, s } = normalizeSigTo65(rawSig);
 
-  // ✅ EXTRA SAFETY: verify locally before sending to relayer
+  // ✅ Verify locally before sending to relayer (prevents “signed different payload” bugs)
   await assertSignatureMatchesUser({ user, msgHash, v, r, s });
 
   const res = await fetch(`${relayerUrl}/relay/nickname`, {
@@ -378,10 +377,11 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
       user,
       nick: trimmed,
       deadline,
+      // relayer accepts either (v,r,s) OR signature — we send BOTH safely.
       v,
       r,
       s,
-      signature,
+      signature, // ALWAYS 65-byte now (132 chars)
     }),
   });
 
@@ -394,6 +394,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   return j;
 }
 
+// direct write (optional)
 export async function setNickname() {
   throw new Error("Direct nickname write not wired here.");
 }

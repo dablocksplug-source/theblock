@@ -21,7 +21,6 @@ function safeParse(json, fallback) {
     return fallback;
   }
 }
-
 function envBool(v) {
   const s = String(v || "").trim().toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "on";
@@ -75,7 +74,6 @@ export function NicknameProvider({ children }) {
 
   // wallet change: set current nickname from per-wallet map (no bleed)
   useEffect(() => {
-    // close modal + stop loading on wallet change / disconnect
     setModalOpen(false);
     setLoading(false);
 

@@ -3,7 +3,14 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { z } from "zod";
-import { createPublicClient, createWalletClient, http, isAddress, parseAbiItem } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddress,
+  parseAbiItem,
+  signatureToHex,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
@@ -371,12 +378,79 @@ function toIntStringSafe(v: any): string {
   return "0";
 }
 
-// --- signature parsing ---
-// We accept: {v,r,s} OR signature string
-// signature string formats:
+// --------------------
+// signature parsing (ACCEPT v/r/s OR signature string)
+// Accept signature formats:
 // - 64-byte compact EIP-2098: 0x + 128 hex (len 130 chars total)
-// - 65-byte: 0x + 130 hex (len 132 chars total)
-// - "weird" 66-byte: 0x + 132 hex (len 134 chars total) -> use last byte as v
+// - 65-byte:                  0x + 130 hex (len 132 chars total)
+// - 66-byte weird:            0x + 132 hex (len 134 chars total) -> use last byte as v
+// Also accepts object payloads with r/s/v/yParity/signature/result/data.
+// --------------------
+function isHexOnly(s: any) {
+  return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
+}
+
+function extractHexSigFromAny(raw: any): string {
+  if (raw && typeof raw === "object") {
+    if (raw.signature) return extractHexSigFromAny(raw.signature);
+    if (raw.result) return extractHexSigFromAny(raw.result);
+    if (raw.data) return extractHexSigFromAny(raw.data);
+
+    const r = raw.r || raw.R;
+    const s = raw.s || raw.S;
+    const v = raw.v ?? raw.V;
+    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
+
+    if (r && s && (v != null || yParity != null)) {
+      const vNum = v != null ? normalizeV(Number(v)) : undefined;
+
+// yParity must be 0 or 1
+const yParityNum =
+  yParity != null
+    ? Number(yParity)
+    : vNum != null
+      ? (vNum === 28 ? 1 : 0)
+      : 0;
+
+// viem expects v as bigint (when provided)
+const hex = signatureToHex({
+  r: r as `0x${string}`,
+  s: s as `0x${string}`,
+  yParity: yParityNum,
+  ...(vNum != null ? { v: BigInt(vNum) } : {}),
+});
+
+      return extractHexSigFromAny(hex);
+    }
+
+    raw = JSON.stringify(raw);
+  }
+
+  const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
+  if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
+
+  if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
+
+  const m66 = s.match(/0x[0-9a-fA-F]{132}/);
+  if (m66?.[0]) return m66[0];
+
+  const m65 = s.match(/0x[0-9a-fA-F]{130}/);
+  if (m65?.[0]) return m65[0];
+
+  const m64 = s.match(/0x[0-9a-fA-F]{128}/);
+  if (m64?.[0]) return m64[0];
+
+  const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
+  if (mAny?.[0]) {
+    const h = mAny[0];
+    if (h.length >= 134) return h.slice(0, 134);
+    if (h.length >= 132) return h.slice(0, 132);
+    if (h.length >= 130) return h.slice(0, 130);
+  }
+
+  throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature (len=${s.length}).`);
+}
+
 function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
   const hex = String(sig64 || "").trim();
   if (!/^0x[0-9a-fA-F]{128}$/.test(hex)) throw new Error("Invalid 64-byte signature");
@@ -410,7 +484,7 @@ function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}
 
   const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
   const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
-  const vRaw = parseInt(hex.slice(132 - 2, 132), 16);
+  const vRaw = parseInt(hex.slice(132, 134), 16);
   const v = normalizeV(vRaw);
   return { v, r, s };
 }
@@ -429,19 +503,18 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
 
     const r = String(body[rKey]).trim() as `0x${string}`;
     const s = String(body[sKey]).trim() as `0x${string}`;
-    if (!/^0x[0-9a-fA-F]{64}$/.test(r.slice(2))) throw new Error(`Invalid ${rKey}`);
-    if (!/^0x[0-9a-fA-F]{64}$/.test(s.slice(2))) throw new Error(`Invalid ${sKey}`);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(r)) throw new Error(`Invalid ${rKey}`);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(s)) throw new Error(`Invalid ${sKey}`);
 
     return { v: vNum, r, s };
   }
 
-  // Otherwise signature hex
-  const sigHex = body?.[sigKey] != null ? String(body[sigKey]).trim().replace(/^"+|"+$/g, "") : "";
+  // Otherwise signature hex string / object
+  const sigLike = body?.[sigKey];
+  const sigHex = sigLike != null ? extractHexSigFromAny(sigLike) : "";
 
   if (!sigHex || sigHex === "0x") {
-    throw new Error(
-      `${sigKey}: Signature missing/blocked (empty). Approve the signature prompt in the wallet and try again.`
-    );
+    throw new Error(`${sigKey}: Signature missing/blocked (empty). Approve the signature prompt in the wallet and try again.`);
   }
   if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
   if (!/^0x[0-9a-fA-F]+$/.test(sigHex)) throw new Error(`Invalid ${sigKey}: not hex`);
@@ -467,13 +540,14 @@ async function requireRelayerMatches() {
   }
 }
 
-async function withTimeout<T = any>(p: any, ms: number, code = "timeout"): Promise<T> {
+async function withTimeout<T>(p: PromiseLike<T> | T, ms: number, code = "timeout"): Promise<T> {
   let t: any;
   const timeout = new Promise<never>((_, rej) => {
     t = setTimeout(() => rej(new Error(code)), ms);
   });
 
   try {
+    // Promise.resolve converts Postgrest builder (thenable) into a real Promise
     return await Promise.race([Promise.resolve(p), timeout]);
   } finally {
     clearTimeout(t);
@@ -862,7 +936,7 @@ app.post("/relay/nickname", async (req, res) => {
     const { v, r, s } = parseSig(body);
 
     const hash = await walletClient.writeContract({
-      address: NICKNAME_REGISTRY_ADDRESS,
+      address: NICKNAME_REGISTRY_ADDRESS as `0x${string}`,
       abi: NICKNAME_MIN_ABI,
       functionName: "setNicknameRelayed",
       args: [user, nick, deadline, v, r, s],

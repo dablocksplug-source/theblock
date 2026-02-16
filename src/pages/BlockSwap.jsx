@@ -42,7 +42,8 @@ function getSupabaseSingleton() {
 }
 const supabase = getSupabaseSingleton();
 
-const shortAddr = (a) => (a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—");
+const shortAddr = (a) =>
+  a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
 
 function clampInt(val, min, max) {
   const n = Number.isFinite(val) ? val : Number(val || 0);
@@ -221,10 +222,6 @@ export default function BlockSwap() {
     isConnected,
     chainId,
     ensureChain,
-    connectMetaMask,
-    connectCoinbase,
-    connectWalletConnect,
-    disconnectWallet,
     provider, // ✅ ACTIVE connector provider (WalletConnect-safe)
   } = useWallet();
 
@@ -303,7 +300,10 @@ export default function BlockSwap() {
   }, []);
 
   const rewardsRoundId = useMemo(() => Number(C.REWARDS_ROUND_ID || 1), []);
-  const rewardsProofsUrl = useMemo(() => String(C.REWARDS_PROOFS_URL || "/rewards/round1.proofs.json"), []);
+  const rewardsProofsUrl = useMemo(
+    () => String(C.REWARDS_PROOFS_URL || "/rewards/round1.proofs.json"),
+    []
+  );
 
   const [rewardsErr, setRewardsErr] = useState("");
   const [rewardsLoading, setRewardsLoading] = useState(false);
@@ -424,14 +424,23 @@ export default function BlockSwap() {
 
   const isAdmin = useMemo(() => {
     if (!walletAddress) return false;
-    return String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET || "").toLowerCase();
+    return (
+      String(walletAddress).toLowerCase() ===
+      String(C.ADMIN_WALLET || "").toLowerCase()
+    );
   }, [walletAddress]);
 
   const STABLE = C.STABLE_SYMBOL || "USDC";
   const TARGET_CHAIN_ID = Number(C.CHAIN_ID || 0);
 
-  const buyTotalOz = useMemo(() => buyBricks * ozPerBrick + buyOunces, [buyBricks, buyOunces, ozPerBrick]);
-  const sellTotalOz = useMemo(() => sellBricks * ozPerBrick + sellOunces, [sellBricks, sellOunces, ozPerBrick]);
+  const buyTotalOz = useMemo(
+    () => buyBricks * ozPerBrick + buyOunces,
+    [buyBricks, buyOunces, ozPerBrick]
+  );
+  const sellTotalOz = useMemo(
+    () => sellBricks * ozPerBrick + sellOunces,
+    [sellBricks, sellOunces, ozPerBrick]
+  );
 
   const buyPriceOz = Number(snap?.ounceSellPrice || 0);
   const sellFloorOz = Number(snap?.ounceBuybackFloor || 0);
@@ -440,12 +449,20 @@ export default function BlockSwap() {
   const sellFloorBrick = sellFloorOz ? sellFloorOz * ozPerBrick : 0;
 
   const buyCost = useMemo(() => buyTotalOz * buyPriceOz, [buyTotalOz, buyPriceOz]);
-  const sellProceeds = useMemo(() => sellTotalOz * sellFloorOz, [sellTotalOz, sellFloorOz]);
+  const sellProceeds = useMemo(
+    () => sellTotalOz * sellFloorOz,
+    [sellTotalOz, sellFloorOz]
+  );
 
   const chainReady = Number(chainId) > 0;
-  const wrongChain = isConnected && Number(TARGET_CHAIN_ID) > 0 && chainReady && Number(chainId) !== Number(TARGET_CHAIN_ID);
+  const wrongChain =
+    isConnected &&
+    Number(TARGET_CHAIN_ID) > 0 &&
+    chainReady &&
+    Number(chainId) !== Number(TARGET_CHAIN_ID);
 
-  const canBuy = isConnected && !wrongChain && !snap?.buyPaused && buyTotalOz > 0 && !!RELAYER_URL;
+  const canBuy =
+    isConnected && !wrongChain && !snap?.buyPaused && buyTotalOz > 0 && !!RELAYER_URL;
   const canSell = isConnected && !wrongChain && sellTotalOz > 0;
 
   async function upsertMyProfile() {
@@ -462,11 +479,15 @@ export default function BlockSwap() {
         nickname: nick || null,
       };
 
-      const { error } = await supabase.from("profiles").upsert(payload, { onConflict: "chain_id,address" });
+      const { error } = await supabase
+        .from("profiles")
+        .upsert(payload, { onConflict: "chain_id,address" });
 
-      if (error && DEBUG_LOGS) console.warn("Supabase upsert profile error:", error?.message || error);
+      if (error && DEBUG_LOGS)
+        console.warn("Supabase upsert profile error:", error?.message || error);
     } catch (e) {
-      if (DEBUG_LOGS) console.warn("Supabase upsert profile exception:", e?.message || e);
+      if (DEBUG_LOGS)
+        console.warn("Supabase upsert profile exception:", e?.message || e);
     }
   }
 
@@ -489,7 +510,8 @@ export default function BlockSwap() {
         .in("address", batch);
 
       if (error) {
-        if (DEBUG_LOGS) console.warn("Supabase fetch profiles error:", error?.message || error);
+        if (DEBUG_LOGS)
+          console.warn("Supabase fetch profiles error:", error?.message || error);
         continue;
       }
 
@@ -540,8 +562,12 @@ export default function BlockSwap() {
       const bust = `&_t=${Date.now()}`;
 
       const [act, hol] = await Promise.all([
-        fetchJson(`${baseUrl}/feed/activity?limit=${FEED_LIMIT}${bust}`, { timeoutMs: 15_000 }),
-        fetchJson(`${baseUrl}/feed/holders?limit=${HOLDERS_LIMIT}${bust}`, { timeoutMs: 15_000 }),
+        fetchJson(`${baseUrl}/feed/activity?limit=${FEED_LIMIT}${bust}`, {
+          timeoutMs: 15_000,
+        }),
+        fetchJson(`${baseUrl}/feed/holders?limit=${HOLDERS_LIMIT}${bust}`, {
+          timeoutMs: 15_000,
+        }),
       ]);
 
       const rowsA = Array.isArray(act?.rows) ? act.rows : [];
@@ -646,7 +672,9 @@ export default function BlockSwap() {
     if (!walletAddress || !isConnected) return;
 
     if (!rewardsAddress) {
-      setRewardsErr("Rewards contract address missing. Set VITE_REWARDS_MERKLE_ADDRESS (or VITE_REWARDS_ADDRESS).");
+      setRewardsErr(
+        "Rewards contract address missing. Set VITE_REWARDS_MERKLE_ADDRESS (or VITE_REWARDS_ADDRESS)."
+      );
       return;
     }
     if (!publicClient) {
@@ -660,25 +688,42 @@ export default function BlockSwap() {
       const entries = Array.isArray(proofs?.entries) ? proofs.entries : [];
 
       const target = String(walletAddress).toLowerCase();
-      const mine = entries.find((e) => String(e?.wallet || "").toLowerCase() === target) || null;
+      const mine =
+        entries.find((e) => String(e?.wallet || "").toLowerCase() === target) ||
+        null;
       if (mountedRef.current) setMyRewardsEntry(mine);
 
       const abi = MERKLE_ABI || MERKLE_MIN_ABI;
       const rid = BigInt(rewardsRoundId);
 
       const [round, claimed] = await Promise.all([
-        publicClient.readContract({ address: rewardsAddress, abi, functionName: "rounds", args: [rid] }),
-        publicClient.readContract({ address: rewardsAddress, abi, functionName: "claimed", args: [rid, target] }),
+        publicClient.readContract({
+          address: rewardsAddress,
+          abi,
+          functionName: "rounds",
+          args: [rid],
+        }),
+        publicClient.readContract({
+          address: rewardsAddress,
+          abi,
+          functionName: "claimed",
+          args: [rid, target],
+        }),
       ]);
 
-      const meta = { merkleRoot: round?.[0], claimEnd: round?.[1], remainingUsdc: round?.[2] };
+      const meta = {
+        merkleRoot: round?.[0],
+        claimEnd: round?.[1],
+        remainingUsdc: round?.[2],
+      };
 
       if (mountedRef.current) {
         setRewardsMeta(meta);
         setMyRewardsClaimed(!!claimed);
       }
     } catch (e) {
-      if (mountedRef.current) setRewardsErr(e?.message || "Failed to load rewards data.");
+      if (mountedRef.current)
+        setRewardsErr(e?.message || "Failed to load rewards data.");
     } finally {
       if (mountedRef.current) setRewardsLoading(false);
     }
@@ -742,7 +787,8 @@ export default function BlockSwap() {
       if (!walletAddress) throw new Error("Connect wallet first.");
       if (snap?.buyPaused) throw new Error("Buys are paused right now.");
       if (buyTotalOz <= 0) throw new Error("Enter an amount to buy.");
-      if (!RELAYER_URL) throw new Error("Relayer is not configured. Buys are gasless-only in this build.");
+      if (!RELAYER_URL)
+        throw new Error("Relayer is not configured. Buys are gasless-only in this build.");
 
       // ✅ bulletproof network confirmation
       await ensureTargetChainOrThrow();
@@ -806,12 +852,18 @@ export default function BlockSwap() {
   };
 
   const vault = snap?.fmt?.vault ?? snap?.fmt?.swapUsdc ?? "—";
-  const treasury = snap?.fmt?.treasuryUsdc ?? snap?.fmt?.treasuryUSDC ?? snap?.fmt?.treasury ?? "—";
+  const treasury =
+    snap?.fmt?.treasuryUsdc ??
+    snap?.fmt?.treasuryUSDC ??
+    snap?.fmt?.treasury ??
+    "—";
 
   const swapOzInvRaw = snap?.fmt?.ozInventory ?? snap?.fmt?.swapOz ?? "—";
-  const swapOzInvPretty = swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
+  const swapOzInvPretty =
+    swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
 
-  const inventoryLooksSuspicious = String(swapOzInvRaw) !== "—" && Number(swapOzInvRaw) === 0 && snap?.sellPricePerBrick;
+  const inventoryLooksSuspicious =
+    String(swapOzInvRaw) !== "—" && Number(swapOzInvRaw) === 0 && snap?.sellPricePerBrick;
 
   const streetActivity = useMemo(() => {
     const rows = Array.isArray(activity) ? activity : [];
@@ -878,150 +930,6 @@ export default function BlockSwap() {
       .sort((a, b) => (b.ouncesWholeNum || 0) - (a.ouncesWholeNum || 0));
   }, [holders, ozPerBrick, circulatingOz, profileMap]);
 
-  const HeaderPill = ({ children, tone = "slate", title }) => {
-    const baseCls = "rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide whitespace-nowrap";
-    const tones = {
-      slate: "border-slate-700/60 bg-slate-900/40 text-slate-300",
-      emerald: "border-emerald-400/30 bg-emerald-500/10 text-emerald-200",
-      rose: "border-rose-400/30 bg-rose-500/10 text-rose-200",
-      indigo: "border-indigo-400/30 bg-indigo-500/10 text-indigo-200",
-      sky: "border-sky-400/30 bg-sky-500/10 text-sky-200",
-      amber: "border-amber-400/30 bg-amber-500/10 text-amber-200",
-    };
-    return (
-      <span className={`${baseCls} ${tones[tone] || tones.slate}`} title={title}>
-        {children}
-      </span>
-    );
-  };
-
-  const ConnectDropdown = () => {
-    return (
-      <details className="relative">
-        <summary className="cursor-pointer list-none rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-sky-400">
-          Connect
-        </summary>
-
-        <div className="absolute right-0 z-20 mt-2 w-44 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
-          <button
-            onClick={async () => {
-              try {
-                setErr("");
-                await connectMetaMask?.();
-              } catch (e) {
-                setErr(e?.message || "MetaMask connect failed.");
-              }
-            }}
-            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-            type="button"
-          >
-            MetaMask
-          </button>
-          <button
-            onClick={async () => {
-              try {
-                setErr("");
-                await connectCoinbase?.();
-              } catch (e) {
-                setErr(e?.message || "Coinbase connect failed.");
-              }
-            }}
-            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-            type="button"
-          >
-            Coinbase
-          </button>
-          <button
-            onClick={async () => {
-              try {
-                setErr("");
-                await connectWalletConnect?.();
-              } catch (e) {
-                setErr(e?.message || "WalletConnect failed.");
-              }
-            }}
-            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-            type="button"
-          >
-            WalletConnect
-          </button>
-
-          <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">You can switch later.</div>
-        </div>
-      </details>
-    );
-  };
-
-  const ConnectedDropdown = () => {
-    const walletChipLabel = (() => {
-      const dn = String(displayName || "").trim() || "Wallet";
-      const dnShort = dn.length > 18 ? `${dn.slice(0, 18)}…` : dn;
-      return `${dnShort} (${shortAddress})`;
-    })();
-
-    return (
-      <details className="relative">
-        <summary
-          className={
-            "cursor-pointer list-none rounded-lg border px-3 py-1.5 text-xs font-semibold " +
-            (wrongChain ? "border-rose-500/40 bg-rose-500/10 text-rose-200" : "border-slate-700 bg-slate-950 text-slate-200 hover:border-slate-500")
-          }
-          title={`${String(displayName || "").trim() || "Wallet"} • ${String(walletAddress || "").toLowerCase()}`}
-        >
-          {walletChipLabel}
-        </summary>
-
-        <div className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
-          <button
-            type="button"
-            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-            onClick={async () => {
-              const ok = await copyToClipboard(String(walletAddress || ""));
-              if (ok) flashToast("Copied ✅");
-            }}
-          >
-            Copy address
-          </button>
-
-          {wrongChain && ensureChain ? (
-            <button
-              type="button"
-              className="w-full px-4 py-2 text-left text-xs text-rose-200 hover:bg-slate-900"
-              onClick={async () => {
-                try {
-                  setErr("");
-                  await ensureTargetChainOrThrow();
-                  flashToast("Network switched ✅");
-                } catch (e) {
-                  setErr(e?.message || "Failed to switch network.");
-                }
-              }}
-            >
-              Switch to chain {TARGET_CHAIN_ID}
-            </button>
-          ) : null}
-
-          <div className="border-t border-slate-800/80" />
-
-          <button
-            type="button"
-            className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-            onClick={() => {
-              try {
-                setErr("");
-                disconnectWallet?.();
-              } catch (e) {
-                setErr(e?.message || "Disconnect failed.");
-              }
-            }}
-          >
-            Disconnect
-          </button>
-        </div>
-      </details>
-    );
-  };
-
   const ContractRow = ({ label, value }) => {
     const v = value || "";
     return (
@@ -1062,35 +970,47 @@ export default function BlockSwap() {
   }, [myRewardsEntry]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-50">
-      {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/85 backdrop-blur">
-        <div className="mx-auto max-w-6xl px-4 py-4">
+    // ✅ Added pt-20 so content clears the FIXED global Navbar
+    <div className="min-h-screen bg-slate-950 text-slate-50 pt-20">
+      <main className="mx-auto max-w-6xl px-4 pb-16 pt-6">
+        {/* Top controls (connect lives in global Navbar now) */}
+        <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <span className="text-lg font-semibold tracking-wide">The Block</span>
+              <span className="text-lg font-semibold tracking-wide">BlockSwap</span>
+
               <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">
-                BlockSwap
+                Settlement: {STABLE}
               </span>
 
-              <HeaderPill tone={snap?.buyPaused ? "rose" : "emerald"} title="Buys can be paused by admin">
+              <span
+                className={
+                  "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
+                  (snap?.buyPaused ? "bg-rose-500/15 text-rose-200" : "bg-emerald-500/15 text-emerald-200")
+                }
+                title="Buys can be paused by admin"
+              >
                 Buys: {snap?.buyPaused ? "PAUSED" : "LIVE"}
-              </HeaderPill>
+              </span>
 
-              <HeaderPill tone={RELAYER_URL ? "emerald" : "rose"} title={RELAYER_URL ? "Relayer enabled (gasless buy + feed)" : "Relayer missing"}>
+              <span
+                className={
+                  "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
+                  (RELAYER_URL ? "bg-emerald-500/15 text-emerald-200" : "bg-rose-500/15 text-rose-200")
+                }
+                title={RELAYER_URL ? "Relayer enabled (gasless buy + feed)" : "Relayer missing"}
+              >
                 Gasless: {RELAYER_URL ? "ON" : "OFF"}
-              </HeaderPill>
+              </span>
 
-              {isAdmin ? <HeaderPill tone="sky">Admin</HeaderPill> : null}
+              {isAdmin ? (
+                <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                  Admin
+                </span>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <HeaderPill tone="slate" title="Settlement stablecoin">
-                Settlement: {STABLE}
-              </HeaderPill>
-
-              {isConnected ? <ConnectedDropdown /> : <ConnectDropdown />}
-
               <button
                 onClick={async () => {
                   await refreshSnapshot({ silent: false });
@@ -1133,7 +1053,14 @@ export default function BlockSwap() {
                 </span>
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-500">
-                  ChainId: <span className="text-slate-300">{TARGET_CHAIN_ID || "—"}</span>
+                  Target ChainId: <span className="text-slate-300">{TARGET_CHAIN_ID || "—"}</span>
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-500">
+                  Wallet:{" "}
+                  <span className="text-slate-300">
+                    {isConnected ? `${displayName} (${shortAddress})` : "disconnected"}
+                  </span>
                 </span>
               </div>
 
@@ -1148,13 +1075,11 @@ export default function BlockSwap() {
               </div>
             </div>
           ) : null}
-        </div>
-      </header>
+        </section>
 
-      <main className="mx-auto max-w-6xl px-4 pb-16 pt-6">
         {wrongChain ? (
           <div className="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-            Wallet is on the wrong network. Use the wallet dropdown → switch network.
+            Wallet is on the wrong network. Open the global Connect Wallet menu (top right) and switch networks in your wallet.
           </div>
         ) : null}
 
@@ -1432,7 +1357,9 @@ export default function BlockSwap() {
                   Sell Back
                 </button>
 
-                <p className="mt-3 text-[0.7rem] leading-relaxed text-slate-500">Sell back uses the on-chain floor price (when available).</p>
+                <p className="mt-3 text-[0.7rem] leading-relaxed text-slate-500">
+                  Sell back uses the on-chain floor price (when available).
+                </p>
               </div>
             </div>
 
@@ -1459,7 +1386,11 @@ export default function BlockSwap() {
                   ))
                 ) : (
                   <li className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-3 text-slate-500">
-                    {RELAYER_URL ? (feedLoadedOnce ? "No recent activity yet." : "Waiting for feed data…") : "Relayer not configured. Activity feed is unavailable."}
+                    {RELAYER_URL
+                      ? feedLoadedOnce
+                        ? "No recent activity yet."
+                        : "Waiting for feed data…"
+                      : "Relayer not configured. Activity feed is unavailable."}
                   </li>
                 )}
               </ul>
@@ -1534,7 +1465,9 @@ export default function BlockSwap() {
                     <tr key={idx} className="border-b border-slate-800/60 last:border-0">
                       <td className="px-3 py-2 text-xs font-mono text-slate-300">{h.display}</td>
                       <td className="px-3 py-2 text-right font-mono">{h.weightLabel}</td>
-                      <td className="px-3 py-2 text-right text-xs text-slate-400">{Number(h.pctWeightCirculating || 0).toFixed(3)}%</td>
+                      <td className="px-3 py-2 text-right text-xs text-slate-400">
+                        {Number(h.pctWeightCirculating || 0).toFixed(3)}%
+                      </td>
                       <td className="px-3 py-2 text-right text-xs">
                         {h.isBrickHolder ? (
                           <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200">Yes</span>
@@ -1547,7 +1480,11 @@ export default function BlockSwap() {
                 ) : (
                   <tr>
                     <td className="px-3 py-4 text-slate-400" colSpan={4}>
-                      {RELAYER_URL ? (feedLoadedOnce ? "No holders yet." : "Waiting for holders data…") : "Relayer not configured. Holders list is unavailable."}
+                      {RELAYER_URL
+                        ? feedLoadedOnce
+                          ? "No holders yet."
+                          : "Waiting for holders data…"
+                        : "Relayer not configured. Holders list is unavailable."}
                     </td>
                   </tr>
                 )}
@@ -1584,7 +1521,9 @@ export default function BlockSwap() {
             </div>
             <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
               <div className="text-[10px] uppercase text-slate-500">Claim Window Ends</div>
-              <div className="font-mono text-xs text-slate-200">{rewardsMeta?.claimEnd ? fmtTimeFromUnix(rewardsMeta.claimEnd) : "—"}</div>
+              <div className="font-mono text-xs text-slate-200">
+                {rewardsMeta?.claimEnd ? fmtTimeFromUnix(rewardsMeta.claimEnd) : "—"}
+              </div>
             </div>
           </div>
 
@@ -1611,7 +1550,9 @@ export default function BlockSwap() {
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
                   <div className="text-xs text-slate-500">Wallet</div>
-                  <div className="font-mono text-sm text-slate-200">{String(walletAddress || "").toLowerCase()}</div>
+                  <div className="font-mono text-sm text-slate-200">
+                    {String(walletAddress || "").toLowerCase()}
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between gap-2 md:justify-end">
@@ -1634,15 +1575,21 @@ export default function BlockSwap() {
                 <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
                   <div className="text-[10px] uppercase text-slate-500">Payout</div>
                   <div className="text-sm font-semibold text-slate-200">
-                    {myPayoutUsdc != null ? `${myPayoutUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC` : "—"}
+                    {myPayoutUsdc != null
+                      ? `${myPayoutUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`
+                      : "—"}
                   </div>
-                  <div className="text-[11px] text-slate-500 font-mono">{myRewardsEntry?.payoutUsdc6 ? String(myRewardsEntry.payoutUsdc6) : ""}</div>
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    {myRewardsEntry?.payoutUsdc6 ? String(myRewardsEntry.payoutUsdc6) : ""}
+                  </div>
                 </div>
 
                 <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
                   <div className="text-[10px] uppercase text-slate-500">Remaining Pool</div>
                   <div className="text-sm font-semibold text-slate-200">
-                    {rewardsMeta?.remainingUsdc != null ? `${formatUnitsPretty(rewardsMeta.remainingUsdc, 6, 6)} USDC` : "—"}
+                    {rewardsMeta?.remainingUsdc != null
+                      ? `${formatUnitsPretty(rewardsMeta.remainingUsdc, 6, 6)} USDC`
+                      : "—"}
                   </div>
                 </div>
               </div>
@@ -1651,7 +1598,14 @@ export default function BlockSwap() {
                 type="button"
                 className="mt-4 w-full rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={handleClaimRewards}
-                disabled={rewardsLoading || !isConnected || wrongChain || !myRewardsEntry || myRewardsClaimed === true || !rewardsAddress}
+                disabled={
+                  rewardsLoading ||
+                  !isConnected ||
+                  wrongChain ||
+                  !myRewardsEntry ||
+                  myRewardsClaimed === true ||
+                  !rewardsAddress
+                }
                 title={!myRewardsEntry ? "Wallet not eligible" : myRewardsClaimed ? "Already claimed" : "Claim rewards"}
               >
                 {myRewardsClaimed === true ? "Already claimed" : "Claim rewards"}

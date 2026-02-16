@@ -55,7 +55,13 @@ const ERC20_MIN_ABI = [
 const ERC20_PERMIT_ABI = [
   { type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
   { type: "function", name: "version", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
-  { type: "function", name: "nonces", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
+  {
+    type: "function",
+    name: "nonces",
+    stateMutability: "view",
+    inputs: [{ type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
 ];
 
 // ----------- events (for RPC fallback; kept for later) -----------
@@ -68,6 +74,9 @@ const EVT_SOLD = parseAbiItem("event SoldBack(address indexed seller, uint256 oz
 const TOPIC_BOUGHT = keccak256(toHex("Bought(address,uint256,uint256,uint256,uint256)"));
 const TOPIC_SOLD = keccak256(toHex("SoldBack(address,uint256,uint256)"));
 
+// -------------------------------
+// Chain + addresses
+// -------------------------------
 function chainFromConfig() {
   if (Number(C.CHAIN_ID) === base.id) return base;
   return baseSepolia;
@@ -78,28 +87,92 @@ function mustAddr(label, v) {
   return v;
 }
 
-let __overrideProvider = null;
-
-// caches
-let __pcCache = { rpc: null, chainId: null, client: null };
-let __wcCache = { chainId: null, provider: null, client: null };
-let __rpcLogged = false;
-
-// logs protection (RPC path only; kept for later)
-let __logsCooldownUntil = 0;
-let __logsFailStreak = 0;
-const __warnedLabels = new Set();
-
-// activity/holders cache (kept for later)
-let __activityCache = { atMs: 0, key: "", data: [] };
-let __holdersCache = { atMs: 0, key: "", data: [] };
-
-// label cache (wallet -> nickname label)
-let __labels = {}; // { [addrLower]: "Nick" }
-
 // deployments loader
 let __deploymentsCache = { atMs: 0, data: null };
 const DEPLOYMENTS_URL = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+
+async function loadDeployments({ ttlMs = 4000 } = {}) {
+  const now = Date.now();
+  if (__deploymentsCache.data && now - __deploymentsCache.atMs < ttlMs) return __deploymentsCache.data;
+
+  try {
+    const res = await fetch(DEPLOYMENTS_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    __deploymentsCache = { atMs: now, data: j };
+    return j;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAddresses() {
+  const d = await loadDeployments();
+  const dj = d?.contracts ? d.contracts : d;
+
+  const swapFromJson = dj?.BlockSwap || dj?.Blockswap || dj?.BLOCKSWAP;
+  const ozFromJson = dj?.OZToken || dj?.OZ || dj?.OZTOKEN;
+  const usdcFromJson = dj?.MockUSDC || dj?.USDC || dj?.MockUsdc;
+
+  const SWAP = mustAddr("BlockSwap", swapFromJson || C.BLOCKSWAP_ADDRESS);
+  const OZ = mustAddr("OZ", ozFromJson || C.OZ_ADDRESS);
+  const USDC = mustAddr("USDC", usdcFromJson || C.USDC_ADDRESS);
+
+  return { SWAP, OZ, USDC, deployments: d || null };
+}
+
+// -------------------------------
+// Provider override (ACTIVE connector provider)
+// -------------------------------
+let __overrideProvider = null;
+
+function setOverrideProvider(p) {
+  if (p && typeof p.request === "function") __overrideProvider = p;
+}
+function clearOverrideProvider() {
+  __overrideProvider = null;
+  __wcCache = { chainId: null, provider: null, client: null };
+}
+
+function pickEip1193Provider() {
+  // ✅ prefer ACTIVE connector provider (WalletContext)
+  if (__overrideProvider && typeof __overrideProvider.request === "function") return __overrideProvider;
+
+  const eth = window?.ethereum;
+  if (!eth) return null;
+
+  const providers = Array.isArray(eth.providers) ? eth.providers : null;
+  if (providers?.length) {
+    const mm = providers.find((p) => p?.isMetaMask && typeof p?.request === "function");
+    if (mm) return mm;
+
+    const cb = providers.find((p) => p?.isCoinbaseWallet && typeof p?.request === "function");
+    if (cb) return cb;
+
+    const any = providers.find((p) => typeof p?.request === "function");
+    if (any) return any;
+
+    return eth;
+  }
+
+  if (typeof eth.request === "function") return eth;
+  return null;
+}
+
+function mustProvider() {
+  const p = pickEip1193Provider();
+  if (!p) throw new Error("No wallet provider found. Install/enable a wallet.");
+  return p;
+}
+
+// -------------------------------
+// caches
+// -------------------------------
+let __pcCache = { rpc: null, chainId: null, client: null };
+let __wcCache = { chainId: null, provider: null, client: null };
+
+// labels cache (wallet -> nickname label)
+let __labels = {}; // { [addrLower]: "Nick" }
 
 // -------------------------------
 // DEBUG SWITCH
@@ -107,6 +180,7 @@ const DEPLOYMENTS_URL = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" :
 const DEBUG_LOGS =
   String(import.meta.env.VITE_DEBUG_LOGS || "").trim() === "1" ||
   String(import.meta.env.VITE_DEBUG_LOGS || "").trim().toLowerCase() === "true";
+let __rpcLogged = false;
 
 // -------------------------------
 // Supabase (UI-side, anon key only) - OPTIONAL
@@ -174,85 +248,14 @@ async function fetchJson(url, { method = "GET", body, timeoutMs = 15_000, noStor
 
 // -------- knobs --------
 const STREET_LIMIT = Number(import.meta.env.VITE_STREET_LIMIT || 15);
-const STREET_POLL_MS = Number(import.meta.env.VITE_STREET_POLL_MS || 90_000); // cache TTL for street
-const STREET_RPC_LOOKBACK = Number(import.meta.env.VITE_STREET_RPC_LOOKBACK || 900); // used only when supa+relayer off
+const STREET_POLL_MS = Number(import.meta.env.VITE_STREET_POLL_MS || 90_000);
 
 const HOLDERS_LIMIT = Number(import.meta.env.VITE_HOLDERS_LIMIT || 250);
-const HOLDERS_POLL_MS = Number(import.meta.env.VITE_HOLDERS_POLL_MS || 90_000); // cache TTL for holders
-const HOLDERS_RPC_LOOKBACK = Number(import.meta.env.VITE_HOLDERS_RPC_LOOKBACK || 2500); // used only when supa+relayer off
+const HOLDERS_POLL_MS = Number(import.meta.env.VITE_HOLDERS_POLL_MS || 90_000);
 
 // -------------------------------
-// Small helpers
+// Helpers
 // -------------------------------
-async function loadDeployments({ ttlMs = 4000 } = {}) {
-  const now = Date.now();
-  if (__deploymentsCache.data && now - __deploymentsCache.atMs < ttlMs) return __deploymentsCache.data;
-
-  try {
-    const res = await fetch(DEPLOYMENTS_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const j = await res.json();
-    __deploymentsCache = { atMs: now, data: j };
-    return j;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveAddresses() {
-  const d = await loadDeployments();
-  const dj = d?.contracts ? d.contracts : d;
-
-  const swapFromJson = dj?.BlockSwap || dj?.Blockswap || dj?.BLOCKSWAP;
-  const ozFromJson = dj?.OZToken || dj?.OZ || dj?.OZTOKEN;
-  const usdcFromJson = dj?.MockUSDC || dj?.USDC || dj?.MockUsdc;
-
-  const SWAP = mustAddr("BlockSwap", swapFromJson || C.BLOCKSWAP_ADDRESS);
-  const OZ = mustAddr("OZ", ozFromJson || C.OZ_ADDRESS);
-  const USDC = mustAddr("USDC", usdcFromJson || C.USDC_ADDRESS);
-
-  return { SWAP, OZ, USDC, deployments: d || null };
-}
-
-function setOverrideProvider(p) {
-  if (p && typeof p.request === "function") __overrideProvider = p;
-}
-function clearOverrideProvider() {
-  __overrideProvider = null;
-  __wcCache = { chainId: null, provider: null, client: null };
-}
-
-function pickEip1193Provider() {
-  // ✅ prefer the ACTIVE connector provider passed from WalletContext
-  if (__overrideProvider && typeof __overrideProvider.request === "function") return __overrideProvider;
-
-  const eth = window?.ethereum;
-  if (!eth) return null;
-
-  const providers = Array.isArray(eth.providers) ? eth.providers : null;
-  if (providers?.length) {
-    const mm = providers.find((p) => p?.isMetaMask && typeof p?.request === "function");
-    if (mm) return mm;
-
-    const cb = providers.find((p) => p?.isCoinbaseWallet && typeof p?.request === "function");
-    if (cb) return cb;
-
-    const any = providers.find((p) => typeof p?.request === "function");
-    if (any) return any;
-
-    return eth;
-  }
-
-  if (typeof eth.request === "function") return eth;
-  return null;
-}
-
-function mustProvider() {
-  const p = pickEip1193Provider();
-  if (!p) throw new Error("No wallet provider found. Install/enable MetaMask (or wallet).");
-  return p;
-}
-
 function nowMs() {
   return Date.now();
 }
@@ -277,6 +280,7 @@ function shortAddr(a) {
   return a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
 }
 
+// label helper
 function labelOrShort(addr) {
   if (!addr) return "—";
   const k = String(addr).toLowerCase();
@@ -285,15 +289,11 @@ function labelOrShort(addr) {
   return shortAddr(addr);
 }
 
-async function safeRead(promise, fallback, label) {
+async function safeRead(promise, fallback) {
   try {
     const v = await promise;
     return v ?? fallback;
-  } catch (e) {
-    if (label && !__warnedLabels.has(label)) {
-      __warnedLabels.add(label);
-      if (DEBUG_LOGS) console.warn(`[safeRead] ${label} failed:`, e?.shortMessage || e?.message || e);
-    }
+  } catch {
     return fallback;
   }
 }
@@ -323,7 +323,7 @@ function resolveLogsRpcUrl() {
 }
 
 // -------------------------------
-// Permit helpers (gasless buy)
+// Permit / message hash (gasless buy)
 // -------------------------------
 function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, chainId }) {
   const TAG = keccak256(toHex("BLOCKSWAP_BUY_OZ"));
@@ -344,12 +344,16 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (COINBASE MOBILE SAFE)
+// SIGNATURE NORMALIZATION (64->65 safe, Coinbase mobile safe)
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
+// Extract a hex signature from many wallet return formats:
+// - string
+// - { result }, { signature }, { data }
+// - { r,s,v } / { r,s,yParity }
 function extractHexSigFromAny(raw) {
   if (raw && typeof raw === "object") {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
@@ -377,8 +381,11 @@ function extractHexSigFromAny(raw) {
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
+  // 65-byte = 0x + 130 hex => 132 chars
+  // 64-byte = 0x + 128 hex => 130 chars
   if (isHexOnly(s) && (s.length === 130 || s.length === 132)) return s;
 
+  // search inside text blobs
   const m65 = s.match(/0x[0-9a-fA-F]{130}/);
   if (m65?.[0]) return m65[0];
 
@@ -395,11 +402,14 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
 }
 
+// Expand 64-byte EIP-2098 => 65-byte (add v)
 function expandCompactSig(sigLike) {
   const s = extractHexSigFromAny(sigLike);
 
+  // already 65-byte
   if (s.length === 132) return s;
 
+  // must be 64-byte compact
   if (s.length !== 130) {
     throw new Error(`Invalid signature length: ${s.length} (expected 130 compact or 132 full).`);
   }
@@ -425,11 +435,9 @@ function assertSig(label, sigLike) {
   return full;
 }
 
-// -------------------------------
-// ✅ Coinbase mobile fix:
-// Prefer walletClient.signMessage({ raw }) so it signs BYTES not "0x..." TEXT.
+// Coinbase mobile safe signer:
+// Prefer walletClient.signMessage({ raw }) => bytes signing.
 // Fallback to personal_sign if needed.
-// -------------------------------
 async function signRawHash({ provider, chain, account, msgHash }) {
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
@@ -443,19 +451,11 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   }
 }
 
-// personal_sign helper (kept for compatibility; used only as fallback path)
-async function personalSign(provider, msgHash, user) {
-  try {
-    return await provider.request({ method: "personal_sign", params: [msgHash, user] });
-  } catch {
-    return await provider.request({ method: "personal_sign", params: [user, msgHash] });
-  }
-}
-
 // -------------------------------
 // Exported adapter
 // -------------------------------
 export const blockswapAdapter = {
+  // ✅ called from NicknameContext / WalletContext
   setProvider(p) {
     setOverrideProvider(p);
   },
@@ -466,6 +466,7 @@ export const blockswapAdapter = {
     clearOverrideProvider();
   },
 
+  // label cache (UI-only convenience)
   setLabel({ walletAddress, label }) {
     if (!walletAddress) return;
     const k = String(walletAddress).toLowerCase();
@@ -479,14 +480,7 @@ export const blockswapAdapter = {
   },
 
   logsStatus() {
-    const left = Math.max(0, __logsCooldownUntil - nowMs());
-    return { cooldownMs: left, failStreak: __logsFailStreak, supabase: !!supabase, relayer: relayerOk() };
-  },
-  resetLogsCooldown() {
-    __logsCooldownUntil = 0;
-    __logsFailStreak = 0;
-    __activityCache = { atMs: 0, key: "", data: [] };
-    __holdersCache = { atMs: 0, key: "", data: [] };
+    return { supabase: !!supabase, relayer: relayerOk() };
   },
 
   _publicClient() {
@@ -541,37 +535,56 @@ export const blockswapAdapter = {
     return resolveAddresses();
   },
 
+  // -------------------------------
+  // Snapshot (prices + vault + treasury)
+  // -------------------------------
   async getSwapSnapshot() {
     const { SWAP, USDC, OZ } = await resolveAddresses();
     const pc = this._publicClient();
 
-    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
-    const buybackFloorPerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buybackFloorPerBrick" });
-    const buyPaused = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "buyPaused" });
+    const sellPricePerBrick = await pc.readContract({
+      address: SWAP,
+      abi: BlockSwap.abi,
+      functionName: "sellPricePerBrick",
+    });
+    const buybackFloorPerBrick = await pc.readContract({
+      address: SWAP,
+      abi: BlockSwap.abi,
+      functionName: "buybackFloorPerBrick",
+    });
+    const buyPaused = await pc.readContract({
+      address: SWAP,
+      abi: BlockSwap.abi,
+      functionName: "buyPaused",
+    });
 
     const floorLiabilityUSDC = await safeRead(
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "floorLiabilityUSDC" }),
-      0n,
-      "floorLiabilityUSDC"
+      0n
     );
 
     const treasuryAddr = await safeRead(
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "theBlockTreasury" }),
-      "0x0000000000000000000000000000000000000000",
-      "theBlockTreasury"
+      "0x0000000000000000000000000000000000000000"
     );
 
-    const swapOzBal = await safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP)");
-    const swapUsdcBal = await safeRead(pc.readContract({ address: USDC, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "USDC.balanceOf(SWAP)");
+    const swapOzBal = await safeRead(
+      pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
+      0n
+    );
+    const swapUsdcBal = await safeRead(
+      pc.readContract({ address: USDC, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
+      0n
+    );
 
-    const treasuryAddrIsZero = !treasuryAddr || String(treasuryAddr).toLowerCase() === "0x0000000000000000000000000000000000000000";
+    const treasuryAddrIsZero =
+      !treasuryAddr || String(treasuryAddr).toLowerCase() === "0x0000000000000000000000000000000000000000";
 
     const treasuryUsdcBal = await safeRead(
       !treasuryAddrIsZero
         ? pc.readContract({ address: USDC, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [treasuryAddr] })
         : Promise.resolve(0n),
-      0n,
-      "USDC.balanceOf(treasury)"
+      0n
     );
 
     const sellPerBrickStr = formatUnits(sellPricePerBrick, 6);
@@ -617,18 +630,17 @@ export const blockswapAdapter = {
         floorPerBrick: floorPerBrickStr,
         liability: formatUnits(floorLiabilityUSDC, 6),
         vault: formatUnits(swapUsdcBal, 6),
-        treasuryUsdc: formatUnits(treasuryUsdcBal, 6),
-        treasuryUSDC: formatUnits(treasuryUsdcBal, 6),
         treasury: formatUnits(treasuryUsdcBal, 6),
         coverage: coverageDisplay,
         swapOz: formatUnits(swapOzBal, 18),
         swapUsdc: formatUnits(swapUsdcBal, 6),
-        ozInventory: formatUnits(swapOzBal, 18),
       },
     };
   },
 
-  // ===== BUY/SELL (direct) =====
+  // -------------------------------
+  // Direct BUY
+  // -------------------------------
   async buyOz({ walletAddress, ouncesWhole }) {
     const { SWAP, USDC, OZ } = await resolveAddresses();
     if (!walletAddress) throw new Error("Connect wallet.");
@@ -640,15 +652,20 @@ export const blockswapAdapter = {
 
     const inv = await safeRead(
       pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }),
-      0n,
-      "OZ.balanceOf(SWAP) buy"
+      0n
     );
 
     if (inv < ozWei) {
-      throw new Error(`Swap is out of inventory. OZ in contract: ${formatUnits(inv, 18)} (need ${formatUnits(ozWei, 18)}).`);
+      throw new Error(
+        `Swap is out of inventory. OZ in contract: ${formatUnits(inv, 18)} (need ${formatUnits(ozWei, 18)}).`
+      );
     }
 
-    const sellPricePerBrick = await pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" });
+    const sellPricePerBrick = await pc.readContract({
+      address: SWAP,
+      abi: BlockSwap.abi,
+      functionName: "sellPricePerBrick",
+    });
     const totalIn = costRoundedUp(ozWei, sellPricePerBrick);
 
     const allowance = await pc.readContract({
@@ -689,6 +706,9 @@ export const blockswapAdapter = {
     return { hash };
   },
 
+  // -------------------------------
+  // Direct SELLBACK
+  // -------------------------------
   async sellBackOz({ walletAddress, ouncesWhole }) {
     const { SWAP, OZ } = await resolveAddresses();
     if (!walletAddress) throw new Error("Connect wallet.");
@@ -736,7 +756,9 @@ export const blockswapAdapter = {
     return { hash };
   },
 
-  // ===== GASLESS BUY (permit + relayed buy) =====
+  // -------------------------------
+  // GASLESS BUY (permit + relayed buy)
+  // -------------------------------
   async buyOzGasless({ walletAddress, ouncesWhole, deadlineSecs = 600 }) {
     const relayerUrl = resolveRelayerUrl();
     if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL in the UI (.env.local / Vercel env).");
@@ -752,12 +774,17 @@ export const blockswapAdapter = {
     const permitDeadline = BigInt(nowSec + Number(deadlineSecs || 600));
 
     const [inv, sellPricePerBrick, nonce, permitNonce, usdcName, usdcVersion] = await Promise.all([
-      safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n, "OZ.balanceOf(SWAP) gasless buy"),
+      safeRead(pc.readContract({ address: OZ, abi: ERC20_MIN_ABI, functionName: "balanceOf", args: [SWAP] }), 0n),
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "sellPricePerBrick" }),
       pc.readContract({ address: SWAP, abi: BlockSwap.abi, functionName: "nonces", args: [walletAddress] }),
       (async () => {
         try {
-          return await pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "nonces", args: [walletAddress] });
+          return await pc.readContract({
+            address: USDC,
+            abi: ERC20_PERMIT_ABI,
+            functionName: "nonces",
+            args: [walletAddress],
+          });
         } catch {
           throw new Error(
             `USDC at ${USDC} does not look permit-capable (missing nonces()).\n` +
@@ -765,8 +792,8 @@ export const blockswapAdapter = {
           );
         }
       })(),
-      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "name" }), "USDC", "USDC.name"),
-      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "version" }), "1", "USDC.version"),
+      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "name" }), "USDC"),
+      safeRead(pc.readContract({ address: USDC, abi: ERC20_PERMIT_ABI, functionName: "version" }), "1"),
     ]);
 
     if (inv < ozWei) throw new Error(`Swap is out of inventory (need ${formatUnits(ozWei, 18)} oz).`);
@@ -782,12 +809,11 @@ export const blockswapAdapter = {
       chainId: Number(C.CHAIN_ID),
     });
 
-    // ✅ Coinbase mobile-safe buy signature:
-    // Prefer walletClient.signMessage({ raw }) first.
     const chain = chainFromConfig();
     const eip1193 = mustProvider();
     const wc = this._walletClient();
 
+    // ✅ BUY SIGNATURE: sign RAW bytes first (Coinbase mobile safe)
     let rawBuySig;
     try {
       rawBuySig = await wc.signMessage({
@@ -795,9 +821,16 @@ export const blockswapAdapter = {
         message: { raw: msgHash },
       });
     } catch {
-      rawBuySig = await personalSign(eip1193, msgHash, walletAddress);
+      // fallback path uses personal_sign if needed
+      rawBuySig = await signRawHash({
+        provider: eip1193,
+        chain,
+        account: walletAddress,
+        msgHash,
+      });
     }
 
+    // Permit typed data
     const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
     const domain = {
       name: usdcName,
@@ -832,10 +865,9 @@ export const blockswapAdapter = {
       message,
     });
 
-    // ✅ STRICT normalize + expand compact signatures BEFORE posting
-   const buySignature = assertSig("buySignature", rawBuySig);
-const permitSignature = assertSig("permitSignature", rawPermitSig);
-
+    // ✅ normalize signatures to 65-byte before POST
+    const buySignature = assertSig("buySignature", rawBuySig);
+    const permitSignature = assertSig("permitSignature", rawPermitSig);
 
     const endpoint = `${relayerUrl.replace(/\/+$/, "")}/relay/buy-permit`;
 
@@ -856,7 +888,9 @@ const permitSignature = assertSig("permitSignature", rawPermitSig);
     });
 
     if (!res.ok || !j?.ok) {
-      throw new Error(j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`);
+      throw new Error(
+        j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`
+      );
     }
 
     return { hash: j.hash };
