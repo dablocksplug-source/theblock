@@ -1,6 +1,7 @@
 // src/pages/BlockPay.jsx
 import React from "react";
 import { useWallet } from "../context/WalletContext.jsx";
+import WalletConnectButton from "../components/WalletConnectButton.jsx";
 
 const MERCHANTS = [
   { name: "Downtown Market Co.", status: "Live" },
@@ -14,7 +15,7 @@ const MERCHANTS = [
 ];
 
 const BlockPay = () => {
-  const { account, connectWallet } = useWallet();
+  const { walletAddress, isConnected } = useWallet();
 
   return (
     <div className="relative min-h-[calc(100vh-140px)] w-full flex flex-col items-center bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100 overflow-hidden">
@@ -107,13 +108,14 @@ const BlockPay = () => {
             <h2 className="text-cyan-300 font-semibold mb-2 text-sm sm:text-base">
               Merchant Status
             </h2>
-            {account ? (
+
+            {isConnected && walletAddress ? (
               <>
                 <p className="text-slate-300 mb-1 text-[11px] sm:text-xs">
                   Wallet connected. You&apos;re ready for onboarding checks.
                 </p>
                 <p className="font-mono text-[10px] sm:text-[11px] text-cyan-300 break-all bg-slate-900/80 rounded-lg px-3 py-2 border border-slate-700/80">
-                  {account}
+                  {walletAddress}
                 </p>
                 <p className="text-slate-500 text-[10px] sm:text-[11px] mt-2">
                   Final verification, payout setup, and QR assignment will be
@@ -126,12 +128,10 @@ const BlockPay = () => {
                   Connect a wallet you intend to use for payouts and
                   verification.
                 </p>
-                <button
-                  onClick={connectWallet}
-                  className="bg-cyan-500/95 hover:bg-cyan-400 text-slate-950 font-semibold py-2 px-5 rounded-xl shadow-[0_0_22px_rgba(34,211,238,0.7)] transition-all duration-300 text-xs sm:text-sm"
-                >
-                  Connect Wallet
-                </button>
+
+                {/* ✅ Dropdown picker (MetaMask / Coinbase / WalletConnect) */}
+                <WalletConnectButton size="md" />
+
                 <p className="text-slate-500 text-[10px] sm:text-[11px] mt-2">
                   This is a visual demo. In production, connected wallets would
                   be tied to your merchant profile.
@@ -190,9 +190,7 @@ const BlockPay = () => {
                 className="flex items-center justify-between rounded-2xl bg-slate-950/90 border border-cyan-500/18 px-4 py-2 shadow-[0_0_14px_rgba(34,211,238,0.22)]"
               >
                 <div className="mr-3">
-                  <div className="font-semibold text-slate-100">
-                    {m.name}
-                  </div>
+                  <div className="font-semibold text-slate-100">{m.name}</div>
                   <div className="text-slate-500 text-[9px] sm:text-[10px]">
                     Verified merchant • The Block Network
                   </div>
@@ -210,8 +208,8 @@ const BlockPay = () => {
             ))}
           </div>
           <p className="mt-1 text-[9px] sm:text-[10px] text-slate-500">
-            This list is illustrative. In production, it will update automatically
-            as merchants onboard into BlockPay.
+            This list is illustrative. In production, it will update
+            automatically as merchants onboard into BlockPay.
           </p>
         </section>
       </div>

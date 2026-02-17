@@ -8,6 +8,9 @@ import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
 import WalletPanel from "../components/WalletPanel";
 import NicknameModal from "../components/NicknameModal";
 
+// ✅ Dropdown connect (MetaMask / Coinbase / WalletConnect)
+import WalletConnectButton from "../components/WalletConnectButton";
+
 // ✅ Simple toast helper (no libs)
 function useToast(ms = 1600) {
   const [toast, setToast] = useState("");
@@ -20,11 +23,13 @@ function useToast(ms = 1600) {
 }
 
 export default function LayoutWrapper({ children }) {
-  const { walletAddress, connectWallet, disconnectWallet, isConnected } = useWallet();
+  const { walletAddress, disconnectWallet, isConnected, chainId } = useWallet(); // ✅ removed connectWallet
   const { nickname, useNickname } = useNicknameContext();
   const location = useLocation();
   const navigate = useNavigate();
   const { toast, setToast } = useToast(1600);
+
+  const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 84532);
 
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
 
@@ -33,9 +38,15 @@ export default function LayoutWrapper({ children }) {
       ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
       : walletAddress || "Not connected";
 
-  const walletButtonLabel = isConnected
-    ? `${displayName} (${shortAddress}) — Disconnect`
-    : "Connect Wallet";
+  // Label when connected is handled by WalletConnectButton itself;
+  // we keep your disconnected label here.
+  const walletButtonLabel = "Connect Wallet";
+
+  const wrongChain =
+    isConnected &&
+    Number(TARGET_CHAIN_ID) > 0 &&
+    Number(chainId || 0) > 0 &&
+    Number(chainId) !== Number(TARGET_CHAIN_ID);
 
   // ✅ Single source of truth for routes + "coming soon" gating.
   // Flip `enabled: true` when a district is ready.
@@ -95,15 +106,34 @@ export default function LayoutWrapper({ children }) {
 
         <div className="text-xs text-slate-500 hidden sm:block">Building slow. Shipping steady.</div>
 
-        <button
-          onClick={isConnected ? disconnectWallet : connectWallet}
-          className={`text-sm px-3 py-1.5 rounded-xl border ${
-            isConnected ? "border-rose-400/30 text-rose-300" : "border-cyan-400/30 text-cyan-300"
-          }`}
-          type="button"
-        >
-          {walletButtonLabel}
-        </button>
+        {/* ✅ Replaces auto-MetaMask connectWallet() with a dropdown picker */}
+        <div className="flex items-center gap-2">
+          {wrongChain ? (
+            <div className="hidden sm:block text-[11px] text-rose-200/90 border border-rose-500/20 bg-rose-500/10 px-2 py-1 rounded-lg">
+              Wrong network
+            </div>
+          ) : null}
+
+          <WalletConnectButton
+            targetChainId={TARGET_CHAIN_ID}
+            size="md"
+            label={walletButtonLabel}
+            onToast={(m) => setToast(String(m || ""))}
+            onError={(m) => setToast(String(m || ""))}
+          />
+
+          {/* Optional quick disconnect (keeps your old behavior available) */}
+          {isConnected ? (
+            <button
+              onClick={() => disconnectWallet?.()}
+              className="text-sm px-3 py-1.5 rounded-xl border border-rose-400/30 text-rose-300 hover:border-rose-300/50"
+              type="button"
+              title={`Disconnect ${displayName} (${shortAddress})`}
+            >
+              Disconnect
+            </button>
+          ) : null}
+        </div>
 
         {/* HUD panel with avatar + nickname + disconnect */}
         <WalletPanel />

@@ -7,12 +7,14 @@ const shortAddr = (a) =>
 async function copyToClipboard(text) {
   const t = String(text || "");
   if (!t) return false;
+
   try {
     if (navigator?.clipboard?.writeText) {
       await navigator.clipboard.writeText(t);
       return true;
     }
   } catch {}
+
   try {
     const ta = document.createElement("textarea");
     ta.value = t;
@@ -29,12 +31,13 @@ async function copyToClipboard(text) {
   }
 }
 
-export default function ConnectMenu({
-  targetChainId = 0,
-  displayName = "",
+export default function WalletConnectButton({
+  targetChainId = Number(import.meta.env.VITE_CHAIN_ID || 84532),
+  size = "sm", // "sm" | "md"
+  label = "Connect Wallet",
   onToast,
   onError,
-  size = "sm", // "sm" | "md"
+  debug = false,
 }) {
   const {
     walletAddress,
@@ -68,13 +71,9 @@ export default function ConnectMenu({
     };
   }, []);
 
-  const wrongChain =
-    isConnected &&
-    Number(targetChainId) > 0 &&
-    Number(chainId || 0) > 0 &&
-    Number(chainId) !== Number(targetChainId);
-
-  const toast = (msg) => typeof onToast === "function" && onToast(msg);
+  const toast = (msg) => {
+    if (typeof onToast === "function") onToast(msg);
+  };
 
   const bubbleErr = (msg) => {
     const m = String(msg || "Something went wrong.");
@@ -82,28 +81,38 @@ export default function ConnectMenu({
     if (typeof onError === "function") onError(m);
   };
 
+  const wrongChain =
+    isConnected &&
+    Number(targetChainId) > 0 &&
+    Number(chainId || 0) > 0 &&
+    Number(chainId) !== Number(targetChainId);
+
   const buttonCls =
     size === "md"
-      ? "rounded-lg px-4 py-2 text-sm font-semibold"
+      ? "rounded-xl px-3 py-1.5 text-sm font-semibold"
       : "rounded-lg px-3 py-1.5 text-xs font-semibold";
 
-  const connectBtnCls = "bg-sky-500 text-slate-950 hover:bg-sky-400 " + buttonCls;
-  const connectedBtnCls = "border bg-slate-950 text-slate-200 hover:border-slate-500 " + buttonCls;
+  const connectBtnCls =
+    "border border-cyan-400/30 text-cyan-200 hover:border-cyan-300/50 bg-slate-950/30 " + buttonCls;
+
+  const connectedBtnCls =
+    "border bg-slate-950 text-slate-200 hover:border-slate-500 " + buttonCls;
 
   const connectedTone = wrongChain
     ? "border-rose-500/40 bg-rose-500/10 text-rose-200"
     : "border-slate-700";
 
-  const walletChipLabel = useMemo(() => {
-    const dn = String(displayName || "").trim() || "Wallet";
-    const dnShort = dn.length > 18 ? `${dn.slice(0, 18)}…` : dn;
-    return walletAddress ? `${dnShort} (${shortAddr(walletAddress)})` : dnShort;
-  }, [displayName, walletAddress]);
+  const chipLabel = useMemo(() => {
+    if (!isConnected) return label;
+    const addr = walletAddress ? shortAddr(walletAddress) : "—";
+    return `Wallet (${addr})`;
+  }, [isConnected, walletAddress, label]);
 
-  // Show/hide options based on actual wagmi connectors present
-  const canWC = (availableConnectors || []).some((c) =>
-    String(c?.name || c?.id || "").toLowerCase().includes("walletconnect")
-  );
+  // Detect WalletConnect presence
+  const canWC = (availableConnectors || []).some((c) => {
+    const s = `${c?.id || ""} ${c?.name || ""}`.toLowerCase();
+    return s.includes("walletconnect");
+  });
 
   return (
     <div ref={rootRef} className="relative">
@@ -113,19 +122,20 @@ export default function ConnectMenu({
         </div>
       ) : null}
 
-      {/* Button */}
+      {/* MAIN BUTTON: ONLY toggles menu. Never connects automatically. */}
       <button
         type="button"
-        className={
-          (!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone) +
-          " cursor-pointer"
-        }
-        onClick={() => setOpen((v) => !v)}
+        className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (debug) console.log("[WalletConnectButton] toggle menu", { open: !open });
+          setOpen((v) => !v);
+        }}
       >
-        {!isConnected ? "Connect Wallet" : walletChipLabel}
+        {chipLabel}
       </button>
 
-      {/* Menu */}
       {open ? (
         <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
           {!isConnected ? (
@@ -133,14 +143,17 @@ export default function ConnectMenu({
               <button
                 type="button"
                 className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   try {
                     setLocalErr("");
                     setOpen(false);
+                    if (debug) console.log("[WalletConnectButton] connect MetaMask");
                     await connectMetaMask?.();
                     toast("Connected ✅");
-                  } catch (e) {
-                    bubbleErr(e?.message || "MetaMask connect failed.");
+                  } catch (err) {
+                    bubbleErr(err?.message || "MetaMask connect failed.");
                   }
                 }}
               >
@@ -150,18 +163,21 @@ export default function ConnectMenu({
               <button
                 type="button"
                 className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   try {
                     setLocalErr("");
                     setOpen(false);
+                    if (debug) console.log("[WalletConnectButton] connect Coinbase");
                     await connectCoinbase?.();
                     toast("Connected ✅");
-                  } catch (e) {
-                    bubbleErr(e?.message || "Coinbase connect failed.");
+                  } catch (err) {
+                    bubbleErr(err?.message || "Coinbase connect failed.");
                   }
                 }}
               >
-                Coinbase
+                Coinbase Wallet
               </button>
 
               <button
@@ -171,14 +187,17 @@ export default function ConnectMenu({
                   (canWC ? "text-slate-200" : "text-slate-500")
                 }
                 disabled={!canWC}
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   try {
                     setLocalErr("");
                     setOpen(false);
+                    if (debug) console.log("[WalletConnectButton] connect WalletConnect");
                     await connectWalletConnect?.();
                     toast("Connected ✅");
-                  } catch (e) {
-                    bubbleErr(e?.message || "WalletConnect failed.");
+                  } catch (err) {
+                    bubbleErr(err?.message || "WalletConnect failed.");
                   }
                 }}
               >
@@ -186,7 +205,7 @@ export default function ConnectMenu({
               </button>
 
               <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
-                Choose a wallet. No auto-connect.
+                Pick a wallet — no auto-connect.
               </div>
             </>
           ) : (
@@ -194,7 +213,9 @@ export default function ConnectMenu({
               <button
                 type="button"
                 className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   const ok = await copyToClipboard(String(walletAddress || ""));
                   if (ok) toast("Copied ✅");
                   setOpen(false);
@@ -207,15 +228,17 @@ export default function ConnectMenu({
                 <button
                   type="button"
                   className="w-full px-4 py-2 text-left text-xs text-rose-200 hover:bg-slate-900"
-                  onClick={async () => {
+                  onClick={async (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
                     try {
                       setLocalErr("");
                       await ensureChain(Number(targetChainId));
                       toast("Network switched ✅");
                       setOpen(false);
-                    } catch (e) {
+                    } catch (err) {
                       bubbleErr(
-                        e?.message ||
+                        err?.message ||
                           `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
                       );
                     }
@@ -230,14 +253,16 @@ export default function ConnectMenu({
               <button
                 type="button"
                 className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => {
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   try {
                     setLocalErr("");
                     disconnectWallet?.();
                     toast("Disconnected");
                     setOpen(false);
-                  } catch (e) {
-                    bubbleErr(e?.message || "Disconnect failed.");
+                  } catch (err) {
+                    bubbleErr(err?.message || "Disconnect failed.");
                   }
                 }}
               >

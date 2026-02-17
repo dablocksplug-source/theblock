@@ -17,6 +17,11 @@ import {
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
+function must(v, msg) {
+  if (!v) throw new Error(msg);
+  return v;
+}
+
 function sanitizeUrl(u) {
   return String(u || "")
     .trim()
@@ -31,7 +36,7 @@ function chainFromConfig() {
 function resolveRpcUrl() {
   const chain = chainFromConfig();
   const rpc =
-    sanitizeUrl(import.meta.env.VITE_RPC_URL) ||
+    sanitizeUrl(import.meta?.env?.VITE_RPC_URL) ||
     chain?.rpcUrls?.default?.http?.[0] ||
     chain?.rpcUrls?.public?.http?.[0];
 
@@ -41,8 +46,8 @@ function resolveRpcUrl() {
 
 function resolveRelayerUrl() {
   return (
-    sanitizeUrl(import.meta.env.VITE_RELAYER_URL) ||
-    sanitizeUrl(import.meta.env.VITE_BLOCK_RELAYER_URL) ||
+    sanitizeUrl(import.meta?.env?.VITE_RELAYER_URL) ||
+    sanitizeUrl(import.meta?.env?.VITE_BLOCK_RELAYER_URL) ||
     ""
   ).replace(/\/+$/, "");
 }
@@ -67,14 +72,22 @@ const NICK_ABI = [
 
 // optional
 const NICK_RELAYER_VIEW_ABI = [
-  { type: "function", name: "relayer", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+  {
+    type: "function",
+    name: "relayer",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
 ];
 
 async function resolveRegistryAddress() {
-  const addr = sanitizeUrl(import.meta.env.VITE_NICKNAME_REGISTRY_ADDRESS);
+  const addr = sanitizeUrl(import.meta?.env?.VITE_NICKNAME_REGISTRY_ADDRESS);
   if (addr && isAddress(addr)) return addr;
 
-  const url = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+  const url =
+    Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (res.ok) {
@@ -91,7 +104,9 @@ async function resolveRegistryAddress() {
     }
   } catch {}
 
-  throw new Error("Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS in Vercel + .env.local.");
+  throw new Error(
+    "Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS in Vercel + .env.local."
+  );
 }
 
 /**
@@ -107,6 +122,9 @@ async function resolveRegistryAddress() {
  *  ))
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
+  must(user && isAddress(user), "Bad user address for nickname signing.");
+  must(registry && isAddress(registry), "Bad registry address for nickname signing.");
+
   const tag = keccak256(toHex("NICKNAME_SET"));
   const nickHash = keccak256(toBytes(String(nick || "")));
 
@@ -179,7 +197,9 @@ function extractHexSigFromAny(raw) {
     if (h.length >= 130) return h.slice(0, 130);
   }
 
-  throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature from response (len=${s.length}).`);
+  throw new Error(
+    `Signature invalid. Could not extract 64/65/66-byte hex signature from response (len=${s.length}).`
+  );
 }
 
 // Convert EIP-2098 64-byte => 65-byte
@@ -189,7 +209,7 @@ function expandEip2098(sig64_hex) {
   const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
-  const v = (vsFirstByte & 0x80) ? 28 : 27;
+  const v = vsFirstByte & 0x80 ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
   const sFixed = sFirstByte + vs.slice(2);
@@ -198,15 +218,19 @@ function expandEip2098(sig64_hex) {
   return `0x${r}${sFixed}${vHex}`; // 65-byte (132 chars)
 }
 
-// If we ever receive a 66-byte (134 chars), we reconstruct a real 65-byte from r/s + v(last byte)
+// If we ever receive a 66-byte (134 chars), reconstruct a real 65-byte from r/s + v(last byte-ish)
 function shrink66To65(sig66) {
   // sig66 is 0x + 132 hex (134 chars)
-  const hex = sig66;
+  const hex = String(sig66 || "");
   const r = hex.slice(2, 66);
   const s = hex.slice(66, 130);
-  const vRaw = parseInt(hex.slice(132, 134), 16);
+
+  // some providers append 2 extra bytes; we treat the LAST byte as v-like
+  const tail2 = hex.slice(hex.length - 2);
+  const vRaw = parseInt(tail2, 16);
   const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
   const vHex = Number(v).toString(16).padStart(2, "0");
+
   return `0x${r}${s}${vHex}`; // 65-byte (132 chars)
 }
 
@@ -245,7 +269,9 @@ function normalizeSigTo65(sigLike) {
     return { signature: sig65, v, r, s };
   }
 
-  throw new Error(`Signature invalid length after extraction: ${extracted.length} (expected 130/132/134).`);
+  throw new Error(
+    `Signature invalid length after extraction: ${extracted.length} (expected 130/132/134).`
+  );
 }
 
 // Coinbase mobile fix:
@@ -256,16 +282,22 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     return await wc.signMessage({
-      account,
-      message: { raw: msgHash },
+      account, // can be Address string
+      message: { raw: msgHash }, // 0x + 32-byte hash
     });
   } catch {}
 
   // 2) fallback: personal_sign (param order differs)
   try {
-    return await provider.request({ method: "personal_sign", params: [msgHash, account] });
+    return await provider.request({
+      method: "personal_sign",
+      params: [msgHash, account],
+    });
   } catch {
-    return await provider.request({ method: "personal_sign", params: [account, msgHash] });
+    return await provider.request({
+      method: "personal_sign",
+      params: [account, msgHash],
+    });
   }
 }
 
@@ -313,7 +345,11 @@ export async function getNickname(walletAddress) {
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
-  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL — set it in Vercel + .env.local.");
+  if (!relayerUrl) {
+    throw new Error(
+      "Missing VITE_RELAYER_URL — set it in Vercel + .env.local (example: https://theblock-relayer.fly.dev)."
+    );
+  }
 
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
@@ -322,7 +358,9 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   if (trimmed.length < 3 || trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
 
   const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
-  if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 missing).");
+  if (!provider?.request) {
+    throw new Error("No wallet provider available for signing (EIP-1193 missing).");
+  }
 
   const chain = chainFromConfig();
   const rpc = resolveRpcUrl();
@@ -352,20 +390,36 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const nowSec = Math.floor(Date.now() / 1000);
   const deadline = nowSec + 600;
 
+  const chainIdNum = Number(C.CHAIN_ID || chain?.id || 0);
+  if (!chainIdNum) throw new Error("Missing CHAIN_ID in config.");
+
   const msgHash = nicknameMsgHash({
     user,
     nick: trimmed,
     nonce,
     deadline,
     registry,
-    chainId: Number(C.CHAIN_ID),
+    chainId: chainIdNum,
   });
 
   // ✅ Sign raw 32-byte hash (Coinbase mobile-safe)
-  const rawSig = await signRawHash({ provider, chain, account: user, msgHash });
+  let rawSig;
+  try {
+    rawSig = await signRawHash({ provider, chain, account: user, msgHash });
+  } catch (e) {
+    throw new Error(`Wallet signing failed: ${e?.shortMessage || e?.message || e}`);
+  }
 
   // ✅ Normalize to 65-byte signature ONLY (relayer compatible)
-  const { signature, v, r, s } = normalizeSigTo65(rawSig);
+  let signature, v, r, s;
+  try {
+    ({ signature, v, r, s } = normalizeSigTo65(rawSig));
+  } catch (e) {
+    throw new Error(
+      `Signature normalize failed: ${e?.message || e}\n` +
+        `Got: ${typeof rawSig === "string" ? `string(len=${rawSig.length})` : typeof rawSig}`
+    );
+  }
 
   // ✅ Verify locally before sending to relayer (prevents “signed different payload” bugs)
   await assertSignatureMatchesUser({ user, msgHash, v, r, s });
@@ -385,10 +439,15 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     }),
   });
 
-  const j = await res.json().catch(() => null);
+  const text = await res.text();
+  let j = null;
+  try {
+    j = JSON.parse(text);
+  } catch {}
+
   if (!res.ok || !j?.ok) {
     if (res.status === 404) throw new Error(`Relayer 404 at ${relayerUrl}/relay/nickname`);
-    throw new Error(j?.error || `Relayer nickname failed (HTTP ${res.status})`);
+    throw new Error(j?.error || j?.message || text || `Relayer nickname failed (HTTP ${res.status})`);
   }
 
   return j;

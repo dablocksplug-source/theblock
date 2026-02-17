@@ -1,6 +1,10 @@
+// src/components/Navbar.jsx
 import React, { useState } from "react";
 import { NavLink } from "react-router-dom";
-import ConnectMenu from "./ConnectMenu";
+
+// ✅ Replace ConnectMenu with the wagmi connector picker
+import WalletConnectButton from "./WalletConnectButton";
+
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
 
@@ -73,18 +77,14 @@ const Navbar = () => {
             </div>
           ) : null}
 
-          <ConnectMenu
-            targetChainId={TARGET_CHAIN_ID}
-            displayName={displayName || shortAddr(walletAddress)}
-            onToast={(m) => {
-              setToast(String(m || ""));
-              setTimeout(() => setToast(""), 1200);
-            }}
-          />
+          {/* ✅ New unified wallet picker (MetaMask / Coinbase / WalletConnect) */}
+          <WalletConnectButton />
 
           {/* Optional tiny status text */}
           <div className="hidden lg:block text-xs text-cyan-400/80 select-none">
-            {isConnected ? `Wallet: ${shortAddr(walletAddress)}` : "Wallet: Disconnected"}
+            {isConnected
+              ? `Wallet: ${displayName || shortAddr(walletAddress)}`
+              : "Wallet: Disconnected"}
           </div>
         </div>
       </div>

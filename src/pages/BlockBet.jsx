@@ -2,6 +2,7 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
+import WalletConnectButton from "../components/WalletConnectButton.jsx";
 
 const STORAGE_KEY = "theblock_blockbet_tickets_v1";
 
@@ -26,7 +27,9 @@ function formatDate(ts) {
 }
 
 export default function BlockBet() {
-  const { account: walletAddress, isConnected, connectWallet } = useWallet();
+  // ✅ unified wallet state (no connectWallet, no account alias)
+  const { walletAddress, isConnected } = useWallet();
+
   const { nickname, useNickname } = useNicknameContext();
   const displayName = getDisplayName({ walletAddress, nickname, useNickname });
 
@@ -75,7 +78,14 @@ export default function BlockBet() {
       const net = bdagOut - fee;
       return { primary: bdagOut, fee, net };
     }
-  }, [bankTab, parsedBankAmount, estRateBBetPerBDAG, poolBDAG, totalBBetSupply, feeRate]);
+  }, [
+    bankTab,
+    parsedBankAmount,
+    estRateBBetPerBDAG,
+    poolBDAG,
+    totalBBetSupply,
+    feeRate,
+  ]);
 
   // ---- local state for the ticket form ----
   const [sport, setSport] = useState("NFL");
@@ -233,7 +243,8 @@ export default function BlockBet() {
             </div>
 
             <h1 className="relative mt-4 text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight">
-              Block<span className="text-cyan-400 drop-shadow-[0_0_18px_rgba(56,189,248,0.7)]">
+              Block
+              <span className="text-cyan-400 drop-shadow-[0_0_18px_rgba(56,189,248,0.7)]">
                 Bet
               </span>
             </h1>
@@ -241,9 +252,7 @@ export default function BlockBet() {
             <p className="relative mt-3 max-w-2xl mx-auto text-sm sm:text-base text-slate-400">
               Peer-to-peer sports betting for The Block. No house, no Vegas lines—just straight
               action in{" "}
-              <span className="font-semibold text-cyan-300">
-                BBET
-              </span>{" "}
+              <span className="font-semibold text-cyan-300">BBET</span>{" "}
               tokens between you and whoever&apos;s bold enough to click accept.
             </p>
 
@@ -284,13 +293,11 @@ export default function BlockBet() {
                 )}
               </div>
 
+              {/* ✅ Dropdown picker (MetaMask / Coinbase / WalletConnect) */}
               {!isConnected && (
-                <button
-                  onClick={connectWallet}
-                  className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-400 to-emerald-400 hover:from-cyan-300 hover:to-emerald-300 text-sm font-semibold text-slate-950 shadow-[0_0_30px_rgba(34,211,238,0.55)] transition-colors"
-                >
-                  Connect Wallet
-                </button>
+                <div className="flex items-center justify-center sm:justify-end">
+                  <WalletConnectButton size="md" />
+                </div>
               )}
             </div>
           </div>
@@ -459,9 +466,7 @@ export default function BlockBet() {
                                     : "border-slate-800 text-slate-500 cursor-not-allowed",
                                 ].join(" ")}
                                 value={spread}
-                                onChange={(e) =>
-                                  setSpread(parseFloat(e.target.value) || 0)
-                                }
+                                onChange={(e) => setSpread(parseFloat(e.target.value) || 0)}
                               />
 
                               {/* plus */}
@@ -855,6 +860,7 @@ export default function BlockBet() {
               <button
                 onClick={() => setIsBankOpen(false)}
                 className="rounded-full p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                type="button"
               >
                 ✕
               </button>
@@ -864,6 +870,7 @@ export default function BlockBet() {
               {/* Tabs */}
               <div className="inline-flex rounded-full bg-slate-900 p-1 text-xs">
                 <button
+                  type="button"
                   onClick={() => {
                     setBankTab("deposit");
                     setBankAmount("");
@@ -878,6 +885,7 @@ export default function BlockBet() {
                   Deposit (BDAG → BBET)
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
                     setBankTab("withdraw");
                     setBankAmount("");
@@ -922,6 +930,7 @@ export default function BlockBet() {
                       : "Amount to withdraw (BBET)"}
                   </span>
                   <button
+                    type="button"
                     className="text-[11px] text-sky-400 hover:text-sky-300"
                     onClick={() =>
                       setBankAmount(
@@ -1000,6 +1009,7 @@ export default function BlockBet() {
 
               {/* Action button */}
               <button
+                type="button"
                 disabled={parsedBankAmount <= 0}
                 className={[
                   "w-full rounded-lg px-3 py-2 text-sm font-semibold transition-colors",

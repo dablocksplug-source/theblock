@@ -16,9 +16,7 @@ const APP_URL =
 
 // Decide chain from env
 const chain =
-  Number(import.meta.env.VITE_CHAIN_ID || 84532) === base.id
-    ? base
-    : baseSepolia;
+  Number(import.meta.env.VITE_CHAIN_ID || 84532) === base.id ? base : baseSepolia;
 
 export const wagmiConfig = createConfig({
   chains: [chain],
@@ -39,7 +37,7 @@ export const wagmiConfig = createConfig({
               name: "The Block",
               description: "BlockSwap + Rewards",
               url: APP_URL,
-              icons: [`${APP_URL}/icons/icon-512.png`],
+              // ✅ no icons needed
             },
           }),
         ]
@@ -47,8 +45,6 @@ export const wagmiConfig = createConfig({
   ],
 
   transports: {
-    [chain.id]: http(
-      import.meta.env.VITE_RPC_URL || chain.rpcUrls.default.http[0]
-    ),
+    [chain.id]: http(import.meta.env.VITE_RPC_URL || chain.rpcUrls.default.http[0]),
   },
 });
