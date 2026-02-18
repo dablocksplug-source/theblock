@@ -52,23 +52,26 @@ export default function InvestorOverview() {
   const TOKEN_SYMBOL = "OZ";
   const OUNCES_PER_BRICK = 36;
 
-  // ✅ Brickonomics (keep aligned with contract)
-  const TOTAL_BRICKS = 2000; // 1 Ton
-  const BLOCK_RESERVE_BRICKS = 500; // adjust anytime
+  // ✅ Brickonomics (aligned with OZToken mint math)
+  // OZToken mints: reserveWholeOz + saleWholeOz
+  // With your deployment notes: 18,000 OZ reserve + 54,000 OZ sale = 72,000 OZ total
+  // 72,000 / 36 = 2,000 bricks total
+  const TOTAL_BRICKS = 2000; // Fixed supply total (2,000 Bricks)
+  const BLOCK_RESERVE_BRICKS = 500; // 500 bricks reserve = 18,000 OZ (adjust if you change OZToken inputs)
 
   const TOTAL_OUNCES = TOTAL_BRICKS * OUNCES_PER_BRICK; // 72,000 OZ
-  const RESERVE_OUNCES = BLOCK_RESERVE_BRICKS * OUNCES_PER_BRICK;
-  const CIRCULATING_BRICKS = Math.max(0, TOTAL_BRICKS - BLOCK_RESERVE_BRICKS);
-  const CIRCULATING_OUNCES = Math.max(0, TOTAL_OUNCES - RESERVE_OUNCES);
+  const RESERVE_OUNCES = BLOCK_RESERVE_BRICKS * OUNCES_PER_BRICK; // 18,000 OZ
+  const CIRCULATING_BRICKS = Math.max(0, TOTAL_BRICKS - BLOCK_RESERVE_BRICKS); // 1,500 bricks
+  const CIRCULATING_OUNCES = Math.max(0, TOTAL_OUNCES - RESERVE_OUNCES); // 54,000 OZ
 
   const highlights = useMemo(
     () => [
       "Read the blueprint first — understand the structure before you move.",
       "BlockSwap settles in USDC on Base. Other districts may run on faster lanes later.",
-      "Fixed supply: 1 Ton total. Weight is measured — not promised.",
+      `Fixed supply: ${TOTAL_BRICKS.toLocaleString()} Bricks (${TOTAL_OUNCES.toLocaleString()} ${TOKEN_SYMBOL}). Weight is measured — not promised.`,
       "Transparency matters: prices, floor, vault levels, and activity are visible.",
     ],
-    []
+    [TOTAL_BRICKS, TOTAL_OUNCES]
   );
 
   return (
@@ -116,7 +119,9 @@ export default function InvestorOverview() {
               <div className="flex flex-wrap gap-2">
                 <Badge>Settlement: USDC</Badge>
                 <Badge>Unit: {TOKEN_SYMBOL}</Badge>
-                <Badge>1 Brick = {OUNCES_PER_BRICK} {TOKEN_SYMBOL}</Badge>
+                <Badge>
+                  1 Brick = {OUNCES_PER_BRICK} {TOKEN_SYMBOL}
+                </Badge>
               </div>
             </div>
 
@@ -161,12 +166,11 @@ export default function InvestorOverview() {
 
               <div className="mt-4 space-y-6 text-sm leading-relaxed text-slate-200">
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    Bricks, Ounces, and Weight
-                  </div>
+                  <div className="font-semibold text-slate-100">Bricks, Ounces, and Weight</div>
                   <p className="mt-2 text-slate-300">
-                    The street talks in <span className="font-semibold text-slate-100">Bricks</span>{" "}
-                    because it’s easy to understand — but the actual unit is{" "}
+                    The street talks in{" "}
+                    <span className="font-semibold text-slate-100">Bricks</span> because it’s easy
+                    to understand — but the actual unit is{" "}
                     <span className="font-semibold text-slate-100">{TOKEN_SYMBOL}</span> (ounces).
                     Your <span className="font-semibold text-slate-100">weight</span> is simply how
                     much {TOKEN_SYMBOL} you hold.
@@ -182,88 +186,74 @@ export default function InvestorOverview() {
                       <span className="font-semibold text-slate-100">weight</span>.
                     </li>
                     <li>
-                      Weight is <span className="font-semibold text-slate-100">position</span> —
-                      not ownership of The Block, not voting power, and not special permissions.
+                      Weight is <span className="font-semibold text-slate-100">position</span> — not
+                      ownership of The Block, not voting power, and not special permissions.
                     </li>
                   </ul>
                 </div>
 
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    What BlockSwap Actually Is
-                  </div>
+                  <div className="font-semibold text-slate-100">What BlockSwap Actually Is</div>
                   <p className="mt-2 text-slate-300">
-                    BlockSwap is the first live district. It’s a simple, transparent market:
-                    you buy {TOKEN_SYMBOL} using <span className="font-semibold text-slate-100">USDC</span>,
-                    and you can sell back to the contract at the{" "}
+                    BlockSwap is the first live district. It’s a simple, transparent market: you buy{" "}
+                    {TOKEN_SYMBOL} using{" "}
+                    <span className="font-semibold text-slate-100">USDC</span>, and you can sell
+                    back to the contract at the{" "}
                     <span className="font-semibold text-slate-100">floor</span> when available.
                   </p>
                   <ul className="mt-3 list-disc space-y-2 pl-5 text-slate-300">
-                    <li>
-                      Buys happen at the posted price (shown in the BlockSwap UI).
-                    </li>
-                    <li>
-                      Sell back happens at the posted floor (shown in the BlockSwap UI).
-                    </li>
-                    <li>
-                      The contract addresses are displayed so you know exactly what you’re interacting with.
-                    </li>
+                    <li>Buys happen at the posted price (shown in the BlockSwap UI).</li>
+                    <li>Sell back happens at the posted floor (shown in the BlockSwap UI).</li>
+                    <li>The contract addresses are displayed so you know exactly what you’re interacting with.</li>
                   </ul>
                 </div>
 
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    Two Lanes, On Purpose
-                  </div>
+                  <div className="font-semibold text-slate-100">Two Lanes, On Purpose</div>
                   <p className="mt-2 text-slate-300">
-                    Money inside The Block moves through two lanes so the foundation stays solid while
-                    the ecosystem grows.
+                    Money inside The Block moves through two lanes so the foundation stays solid
+                    while the ecosystem grows.
                   </p>
                   <ul className="mt-3 list-disc space-y-2 pl-5 text-slate-300">
                     <li>
-                      <span className="font-semibold text-slate-100">Buyback Vault</span> supports the
-                      floor and protects exits.
+                      <span className="font-semibold text-slate-100">Buyback Vault</span> supports
+                      the floor and protects exits.
                     </li>
                     <li>
-                      <span className="font-semibold text-slate-100">Block Capital</span> funds districts,
-                      development, and expansion.
+                      <span className="font-semibold text-slate-100">Block Capital</span> funds
+                      districts, development, and expansion.
                     </li>
                     <li>
-                      Major movement shows in the <span className="font-semibold text-slate-100">activity feed</span>.
+                      Major movement shows in the{" "}
+                      <span className="font-semibold text-slate-100">activity feed</span>.
                     </li>
                   </ul>
                 </div>
 
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    The Floor + The Drought
-                  </div>
+                  <div className="font-semibold text-slate-100">The Floor + The Drought</div>
                   <p className="mt-2 text-slate-300">
-                    The floor exists to create a dependable exit lane. Sometimes, new sell pressure may be
-                    paused to protect holders during “droughts” — times where the structure focuses on
-                    stability and building value instead of flooding the street.
+                    The floor exists to create a dependable exit lane. Sometimes, new sell pressure
+                    may be paused to protect holders during “droughts” — times where the structure
+                    focuses on stability and building value instead of flooding the street.
                   </p>
                 </div>
 
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    How the Floor Grows
-                  </div>
+                  <div className="font-semibold text-slate-100">How the Floor Grows</div>
                   <p className="mt-2 text-slate-300">
-                    As milestones are hit and systems start producing, The Block can inject into the vault.
-                    When the floor moves, it moves one direction:{" "}
+                    As milestones are hit and systems start producing, The Block can inject into the
+                    vault. When the floor moves, it moves one direction:{" "}
                     <span className="font-semibold text-slate-100">up</span>.
                   </p>
                 </div>
 
                 <div>
-                  <div className="font-semibold text-slate-100">
-                    Claims (When the Structure Eats)
-                  </div>
+                  <div className="font-semibold text-slate-100">Claims (When the Structure Eats)</div>
                   <p className="mt-2 text-slate-300">
                     Sometimes the structure performs and rewards are shared. When that happens:
-                    claims are announced, eligibility is snapshotted at announcement, and exact amounts
-                    are shown at claim time.
+                    claims are announced, eligibility is snapshotted at announcement, and exact
+                    amounts are shown at claim time.
                   </p>
                 </div>
 
@@ -292,8 +282,8 @@ export default function InvestorOverview() {
             <div className="mt-6 rounded-2xl border border-amber-400/30 bg-amber-500/10 p-5 text-sm text-amber-200">
               <div className="font-semibold text-amber-100">Important</div>
               <p className="mt-2 text-amber-100/90 leading-relaxed">
-                Nothing on this page is financial advice. Crypto is risky. Only move what you can afford
-                to lose. If you don’t understand the structure, take your time.
+                Nothing on this page is financial advice. Crypto is risky. Only move what you can
+                afford to lose. If you don’t understand the structure, take your time.
               </p>
             </div>
           </div>
@@ -313,7 +303,7 @@ export default function InvestorOverview() {
                   <div className="text-xs uppercase tracking-wide text-slate-400">Supply</div>
                   <ul className="mt-2 space-y-2">
                     <li>
-                      <span className="font-semibold text-slate-200">1 Ton Total:</span>{" "}
+                      <span className="font-semibold text-slate-200">Fixed Total:</span>{" "}
                       {TOTAL_BRICKS.toLocaleString()} Bricks{" "}
                       <span className="text-slate-400">
                         (= {TOTAL_OUNCES.toLocaleString()} {TOKEN_SYMBOL})
@@ -356,7 +346,8 @@ export default function InvestorOverview() {
                 <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
                   <div className="text-xs uppercase tracking-wide text-slate-400">Transfers</div>
                   <p className="mt-2 text-slate-300">
-                    Final design does <span className="font-semibold text-slate-200">not</span> lock transfers.
+                    Final design does{" "}
+                    <span className="font-semibold text-slate-200">not</span> lock transfers.
                   </p>
                 </div>
               </div>
@@ -365,7 +356,8 @@ export default function InvestorOverview() {
             <Section title="Weight & Position">
               <ul className="list-disc space-y-2 pl-5">
                 <li>
-                  Weight is measured by <span className="font-semibold text-slate-200">{TOKEN_SYMBOL}</span> held.
+                  Weight is measured by{" "}
+                  <span className="font-semibold text-slate-200">{TOKEN_SYMBOL}</span> held.
                 </li>
                 <li>Weight is not ownership, control, or special permissions.</li>
                 <li>Weight can be used for buybacks + claim eligibility (when announced).</li>
@@ -385,9 +377,7 @@ export default function InvestorOverview() {
                 <li>Sell backs remain available as an exit lane (when enabled).</li>
                 <li>Floor starts at the posted floor (example: $500 / brick).</li>
                 <li>Floor only moves up, and increases are announced.</li>
-                <li>
-                  New sell pressure may be manually paused during droughts to protect Brick holders.
-                </li>
+                <li>New sell pressure may be manually paused during droughts to protect Brick holders.</li>
               </ul>
             </Section>
 
@@ -402,10 +392,12 @@ export default function InvestorOverview() {
             <Section title="Infrastructure (Base + B3)">
               <ul className="list-disc space-y-2 pl-5">
                 <li>
-                  BlockSwap lives on <span className="font-semibold text-slate-200">Base</span> for reliable settlement.
+                  BlockSwap lives on{" "}
+                  <span className="font-semibold text-slate-200">Base</span> for reliable settlement.
                 </li>
                 <li>
-                  Other districts can run on <span className="font-semibold text-slate-200">B3</span> for speed and high activity.
+                  Other districts can run on{" "}
+                  <span className="font-semibold text-slate-200">B3</span> for speed and high activity.
                 </li>
                 <li>Your weight stays consistent as the ecosystem expands.</li>
               </ul>
