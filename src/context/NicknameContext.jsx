@@ -10,6 +10,7 @@ const NicknameContext = createContext(null);
 function normalizeAddr(a) {
   return a ? String(a).toLowerCase() : "";
 }
+
 function safeParse(json, fallback) {
   try {
     return JSON.parse(json);
@@ -17,10 +18,12 @@ function safeParse(json, fallback) {
     return fallback;
   }
 }
+
 function envBool(v) {
   const s = String(v || "").trim().toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "on";
 }
+
 function errToString(e) {
   if (!e) return "Unknown error";
   if (typeof e === "string") return e;
@@ -38,7 +41,7 @@ export function NicknameProvider({ children }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ensure adapter signs with the *active* provider (Coinbase/WC/mobile-safe)
+  // ensure adapter signs with the active provider
   useEffect(() => {
     try {
       if (provider && typeof provider.request === "function") {
@@ -70,7 +73,7 @@ export function NicknameProvider({ children }) {
     }
   }, [useNickname, nicknamesByAddr]);
 
-  // wallet change: set current nickname from per-wallet map (no bleed)
+  // wallet change
   useEffect(() => {
     setModalOpen(false);
     setLoading(false);
@@ -88,9 +91,10 @@ export function NicknameProvider({ children }) {
     }
   }, [addrKey, nicknamesByAddr]);
 
-  // on wallet connect/change, try to read chain nickname once
+  // read chain nickname once on connect/change
   useEffect(() => {
     if (!walletAddress) return;
+
     let cancelled = false;
 
     (async () => {
@@ -100,7 +104,6 @@ export function NicknameProvider({ children }) {
         if (cancelled || trimmed.length === 0) return;
 
         const key = normalizeAddr(walletAddress);
-
         setNicknamesByAddr((prev) => {
           const cur = prev?.[key];
           if (cur === trimmed) return prev || {};
@@ -141,8 +144,8 @@ export function NicknameProvider({ children }) {
 
     if (!walletAddress || !isConnected) throw new Error("Connect your wallet first.");
     if (!trimmed) throw new Error("Enter a nickname first.");
-    if (trimmed.length < 3) throw new Error("Nickname must be 3–24 chars.");
-    if (trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
+    if (trimmed.length < 3) throw new Error("Name too short.");
+    if (trimmed.length > 24) throw new Error("Name too long (max 24).");
 
     setLoading(true);
     try {
@@ -184,16 +187,12 @@ export function NicknameProvider({ children }) {
   const value = {
     nickname,
     useNickname,
-
     setNickname,
     setUseNickname,
-
     modalOpen,
     setModalOpen,
-
     loading,
     saveNickname,
-
     askForNickname,
   };
 
@@ -205,6 +204,7 @@ export function useNicknameContext() {
   if (!ctx) throw new Error("useNicknameContext must be used inside a NicknameProvider");
   return ctx;
 }
+
 export function useNickname() {
   return useNicknameContext();
 }
