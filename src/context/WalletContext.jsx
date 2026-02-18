@@ -14,6 +14,8 @@ import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const WalletContext = createContext(null);
 
+const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 84532);
+
 function norm(s) {
   return String(s || "").toLowerCase().trim();
 }
@@ -32,21 +34,26 @@ function findConnector(connectors, { ids = [], nameIncludes = [] } = {}) {
   return null;
 }
 
-function pickInjected(connectors) {
+function pickMetaMask(connectors) {
+  // wagmi v2 metaMask() connector id is typically "metaMask"
   return findConnector(connectors, {
-    ids: ["injected", "io.metamask", "metamask", "metamasksdk"],
-    nameIncludes: ["metamask", "injected"],
+    ids: ["metamask", "metaMask", "io.metamask", "injected", "metamasksdk"],
+    nameIncludes: ["metamask"],
   });
 }
+
 function pickCoinbase(connectors) {
+  // wagmi v2 coinbaseWallet() id is typically "coinbaseWallet"
   return findConnector(connectors, {
-    ids: ["coinbasewallet", "coinbasewalletsdk"],
+    ids: ["coinbasewallet", "coinbaseWallet", "coinbasewalletsdk"],
     nameIncludes: ["coinbase"],
   });
 }
+
 function pickWalletConnect(connectors) {
+  // wagmi v2 walletConnect() id is typically "walletConnect"
   return findConnector(connectors, {
-    ids: ["walletconnect", "walletconnectv2", "walletconnectsdk"],
+    ids: ["walletconnect", "walletConnect", "walletconnectv2", "walletconnectsdk"],
     nameIncludes: ["walletconnect"],
   });
 }
@@ -72,7 +79,12 @@ export function WalletProvider({ children }) {
   const [provider, setProvider] = useState(null);
 
   const availableConnectors = useMemo(() => {
-    return (connectors || []).map((c) => ({ id: c?.id, name: c?.name }));
+    // include "ready" if present (wagmi v2 connectors usually expose it)
+    return (connectors || []).map((c) => ({
+      id: c?.id,
+      name: c?.name,
+      ready: typeof c?.ready === "boolean" ? c.ready : true,
+    }));
   }, [connectors]);
 
   const setAdapterProviderFromConnector = useCallback(async (c) => {
@@ -104,68 +116,92 @@ export function WalletProvider({ children }) {
 
   const connectWith = useCallback(
     async (c, label = "wallet") => {
+      const list = Array.isArray(connectors) ? connectors : [];
+
       if (!c) {
         throw new Error(
-          `Connector not available for ${label}. Available: ${(availableConnectors || [])
-            .map((x) => `${x.id}→${x.name}`)
+          `Connector not available for ${label}.\nAvailable: ${(availableConnectors || [])
+            .map((x) => `${x.id}→${x.name}${x.ready === false ? " (not ready)" : ""}`)
             .join(", ")}`
         );
       }
 
+      // If connector exposes "ready" and it's false, block with a clear message
+      if (typeof c?.ready === "boolean" && c.ready === false) {
+        throw new Error(
+          `${label} connector is not ready on this device/browser.\nTry a different wallet option or open the site inside the wallet browser.`
+        );
+      }
+
       if (status === "pending") {
-        throw new Error("Connection already in progress. Check your wallet popup.");
+        throw new Error("Connection already in progress. Check your wallet popup/app.");
       }
       if (connectInFlightRef.current) {
-        throw new Error("Connection already in progress. Check your wallet popup.");
+        throw new Error("Connection already in progress. Check your wallet popup/app.");
       }
 
       connectInFlightRef.current = true;
 
       try {
-        const res = await connectAsync({ connector: c });
+        // ✅ IMPORTANT FOR MOBILE: pass chainId hint
+        // Many mobile wallets behave better when chainId is supplied.
+        const res = await connectAsync({ connector: c, chainId: TARGET_CHAIN_ID });
+
+        // sync adapter provider
         await setAdapterProviderFromConnector(c);
+
         return res;
       } catch (e) {
         if (isPendingPermissionsError(e)) {
           throw new Error(
-            "Wallet request already pending. Open your wallet and approve/close the existing request, then try again."
+            "Wallet request already pending.\nOpen your wallet and approve/close the existing request, then try again."
           );
         }
-        throw e;
+        // Some wallets throw vague errors — surface as much as we can
+        throw new Error(e?.shortMessage || e?.message || String(e));
       } finally {
         connectInFlightRef.current = false;
       }
     },
-    [connectAsync, setAdapterProviderFromConnector, availableConnectors, status]
+    [connectAsync, setAdapterProviderFromConnector, availableConnectors, status, connectors]
   );
 
   const connectMetaMask = useCallback(async () => {
-    const c = pickInjected(connectors);
+    const c = pickMetaMask(connectors);
     if (!c) {
-      throw new Error("MetaMask connector not found. Install/enable MetaMask, then refresh.");
+      throw new Error(
+        "MetaMask connector not found.\nIf you're on mobile Safari/Chrome, try opening theblock.live inside the MetaMask app browser."
+      );
     }
     return connectWith(c, "MetaMask");
   }, [connectors, connectWith]);
 
   const connectCoinbase = useCallback(async () => {
     const c = pickCoinbase(connectors);
-    return connectWith(c, "Coinbase");
+    if (!c) {
+      throw new Error(
+        "Coinbase Wallet connector not found.\nTry opening the site inside Coinbase Wallet’s in-app browser."
+      );
+    }
+    return connectWith(c, "Coinbase Wallet");
   }, [connectors, connectWith]);
 
   const connectWalletConnect = useCallback(async () => {
     const c = pickWalletConnect(connectors);
     if (!c) {
-      throw new Error("WalletConnect connector not found. Add WC projectId in wagmi.");
+      throw new Error(
+        "WalletConnect connector not found.\nMake sure VITE_WC_PROJECT_ID is set in Vercel + local env."
+      );
     }
     return connectWith(c, "WalletConnect");
   }, [connectors, connectWith]);
 
   const connectWallet = useCallback(async () => {
-    const injected = pickInjected(connectors);
+    const mm = pickMetaMask(connectors);
     const cb = pickCoinbase(connectors);
     const wc = pickWalletConnect(connectors);
     const first = (connectors || [])[0] || null;
-    return connectWith(injected || cb || wc || first, "Connect Wallet");
+    return connectWith(mm || cb || wc || first, "Connect Wallet");
   }, [connectors, connectWith]);
 
   const ensureChain = useCallback(
@@ -220,6 +256,9 @@ export function WalletProvider({ children }) {
       connectStatus: status,
       connectError: error?.message || null,
       availableConnectors,
+
+      // handy for debugging UI if needed
+      targetChainId: TARGET_CHAIN_ID,
     }),
     [
       address,
