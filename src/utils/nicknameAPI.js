@@ -10,8 +10,6 @@ import {
   encodeAbiParameters,
   parseAbiParameters,
   toBytes,
-  recoverAddress,
-  hashMessage,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -19,6 +17,7 @@ function envBool(v) {
   const s = String(v || "").trim().toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "on";
 }
+
 const DBG = envBool(import.meta.env.VITE_DEBUG_NICKNAME);
 
 function dlog(...args) {
@@ -145,7 +144,7 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 
 // -------------------------------
 // Signature normalization
-// Always normalize to a real 65-byte hex signature: 0x + 130 hex chars (length 132).
+// Always normalize to v/r/s for relayer (supports 64/65/66 byte signatures).
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -226,10 +225,7 @@ function normalizeSigTo65(sigLike) {
   }
 
   const hex = extracted.trim();
-
-  if (!hex.startsWith("0x")) {
-    throw new Error("Invalid signature format (missing 0x).");
-  }
+  if (!hex.startsWith("0x")) throw new Error("Invalid signature format (missing 0x).");
 
   const len = hex.length;
 
@@ -286,38 +282,6 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   throw new Error(lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.");
 }
 
-// ✅ Verify using SIGNATURE HEX (avoid v/r/s object pitfalls)
-async function assertSignatureMatchesUser({ user, msgHash, signature }) {
-  const sig = signature;
-
-  // HARD GUARDS so we never crash with "reading length"
-  if (typeof sig !== "string") {
-    throw new Error(`Signature is not a string (got ${typeof sig}).`);
-  }
-  if (!sig.startsWith("0x")) {
-    throw new Error(`Signature missing 0x prefix.`);
-  }
-  if (!/^0x[0-9a-fA-F]+$/.test(sig)) {
-    throw new Error(`Signature is not hex.`);
-  }
-  if (sig.length !== 132) {
-    // 65-byte signature: 0x + 130 hex = 132 total chars
-    throw new Error(`Signature wrong length (got ${sig.length}, expected 132).`);
-  }
-
-  try {
-    // Solidity uses toEthSignedMessageHash(bytes32)
-    const ethSigned = hashMessage({ message: { raw: msgHash } });
-    const recovered = await recoverAddress({ hash: ethSigned, signature: sig });
-
-    if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
-      throw new Error(`Bad signature (recovered ${recovered}). Wallet signed a different payload.`);
-    }
-  } catch (e) {
-    throw new Error(`Signature verify failed: ${e?.shortMessage || e?.message || String(e)}`);
-  }
-}
-
 export async function getNickname(walletAddress) {
   if (!walletAddress || !isAddress(walletAddress)) return "";
 
@@ -343,6 +307,11 @@ export async function getNickname(walletAddress) {
 /**
  * Gasless nickname (relayer pays gas)
  * Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC).
+ *
+ * IMPORTANT:
+ * We DO NOT locally verify the signature anymore.
+ * The smart contract is the source of truth and will revert BadSig() if wrong.
+ * This avoids wallet/provider edge-cases that were crashing the UI.
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
@@ -405,8 +374,6 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
 
   const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
   dlog("normalized", { sigLen: signature?.length, v, r, s });
-
-  await assertSignatureMatchesUser({ user, msgHash, signature });
 
   const res = await fetch(`${relayerUrl}/relay/nickname`, {
     method: "POST",
