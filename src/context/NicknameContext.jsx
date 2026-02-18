@@ -37,7 +37,7 @@ export function NicknameProvider({ children }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ✅ IMPORTANT: ensure adapter signs with the *active* provider (Coinbase/WC/mobile-safe)
+  // ✅ ensure adapter signs with the active provider (Coinbase/WC/mobile-safe)
   useEffect(() => {
     try {
       if (provider && typeof provider.request === "function") {
@@ -117,7 +117,6 @@ export function NicknameProvider({ children }) {
           blockswapAdapter.setLabel({ walletAddress, label: trimmed });
         } catch {}
       } catch (err) {
-        // normal: no nickname set yet / contract call failed
         console.debug("No nickname on chain for this wallet:", err?.message);
       }
     })();
@@ -150,18 +149,19 @@ export function NicknameProvider({ children }) {
 
     setLoading(true);
     try {
-      // ✅ gasless: sign with active connected provider (MetaMask/Coinbase/WC)
+      // ✅ gasless first
       try {
         await setNicknameRelayed(trimmed, walletAddress, provider);
       } catch (e) {
         const allowDirect = envBool(import.meta.env.VITE_ALLOW_DIRECT_NICKNAME);
+
+        // ✅ IMPORTANT: don’t mask the real relayer error with a generic message
         if (!allowDirect) {
-          throw new Error(
-            `Gasless nickname failed: ${e?.shortMessage || e?.message || e}\n` +
-              `Fix: ensure relayer exposes POST /relay/nickname and VITE_RELAYER_URL is set.\n` +
-              `Dev escape hatch: set VITE_ALLOW_DIRECT_NICKNAME=true (or 1).`
-          );
+          const msg = e?.shortMessage || e?.message || String(e);
+          throw new Error(`Gasless nickname failed: ${msg}`);
         }
+
+        // dev escape hatch
         await setNicknameDirect(trimmed, walletAddress);
       }
 

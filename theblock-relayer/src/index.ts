@@ -205,6 +205,9 @@ function sendJson(res: any, obj: any, status = 200) {
 const allowlist = new Set<string>([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
+
+ 
+
   "https://theblock.live",
   "https://www.theblock.live",
   "https://theblock.vercel.app",

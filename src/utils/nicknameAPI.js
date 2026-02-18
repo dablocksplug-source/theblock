@@ -17,11 +17,6 @@ import {
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
-function must(v, msg) {
-  if (!v) throw new Error(msg);
-  return v;
-}
-
 function sanitizeUrl(u) {
   return String(u || "")
     .trim()
@@ -36,7 +31,7 @@ function chainFromConfig() {
 function resolveRpcUrl() {
   const chain = chainFromConfig();
   const rpc =
-    sanitizeUrl(import.meta?.env?.VITE_RPC_URL) ||
+    sanitizeUrl(import.meta.env.VITE_RPC_URL) ||
     chain?.rpcUrls?.default?.http?.[0] ||
     chain?.rpcUrls?.public?.http?.[0];
 
@@ -46,10 +41,22 @@ function resolveRpcUrl() {
 
 function resolveRelayerUrl() {
   return (
-    sanitizeUrl(import.meta?.env?.VITE_RELAYER_URL) ||
-    sanitizeUrl(import.meta?.env?.VITE_BLOCK_RELAYER_URL) ||
+    sanitizeUrl(import.meta.env.VITE_RELAYER_URL) ||
+    sanitizeUrl(import.meta.env.VITE_BLOCK_RELAYER_URL) ||
     ""
   ).replace(/\/+$/, "");
+}
+
+function envBool(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
+function dbg(...args) {
+  if (envBool(import.meta.env.VITE_DEBUG_LOGS)) {
+    // eslint-disable-next-line no-console
+    console.log("[nicknameAPI]", ...args);
+  }
 }
 
 // --- minimal NicknameRegistryRelayed ABI ---
@@ -70,7 +77,6 @@ const NICK_ABI = [
   },
 ];
 
-// optional
 const NICK_RELAYER_VIEW_ABI = [
   {
     type: "function",
@@ -82,11 +88,13 @@ const NICK_RELAYER_VIEW_ABI = [
 ];
 
 async function resolveRegistryAddress() {
-  const addr = sanitizeUrl(import.meta?.env?.VITE_NICKNAME_REGISTRY_ADDRESS);
+  const addr = sanitizeUrl(import.meta.env.VITE_NICKNAME_REGISTRY_ADDRESS);
   if (addr && isAddress(addr)) return addr;
 
   const url =
-    Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+    Number(C.CHAIN_ID) === 8453
+      ? "/deployments.base.json"
+      : "/deployments.baseSepolia.json";
 
   try {
     const res = await fetch(url, { cache: "no-store" });
@@ -122,39 +130,33 @@ async function resolveRegistryAddress() {
  *  ))
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
-  must(user && isAddress(user), "Bad user address for nickname signing.");
-  must(registry && isAddress(registry), "Bad registry address for nickname signing.");
-
   const tag = keccak256(toHex("NICKNAME_SET"));
   const nickHash = keccak256(toBytes(String(nick || "")));
 
   return keccak256(
     encodeAbiParameters(
-      parseAbiParameters("bytes32,address,bytes32,uint256,uint256,address,uint256"),
+      parseAbiParameters(
+        "bytes32,address,bytes32,uint256,uint256,address,uint256"
+      ),
       [tag, user, nickHash, BigInt(nonce), BigInt(deadline), registry, BigInt(chainId)]
     )
   );
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (MATCH RELAYER)
-// Relayer accepts signature lengths: 64-byte (130 chars) OR 65-byte (132 chars).
-// It does NOT accept 66-byte (134) as a "signature" string.
-//
-// So: we ALWAYS convert everything to a 65-byte signature string.
+// SIGNATURE NORMALIZATION
+// Always convert to a 65-byte signature for relayer compatibility.
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
 function extractHexSigFromAny(raw) {
-  // unwrap objects
   if (raw && typeof raw === "object") {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
     if (raw.result) return extractHexSigFromAny(raw.result);
     if (raw.data) return extractHexSigFromAny(raw.data);
 
-    // r/s/v style
     const r = raw.r || raw.R;
     const s = raw.s || raw.S;
     const v = raw.v ?? raw.V;
@@ -175,10 +177,8 @@ function extractHexSigFromAny(raw) {
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
-  // already clean (64/65/66)
   if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
 
-  // extract embedded (prefer 66 > 65 > 64)
   const m66 = s.match(/0x[0-9a-fA-F]{132}/);
   if (m66?.[0]) return m66[0];
 
@@ -188,7 +188,6 @@ function extractHexSigFromAny(raw) {
   const m64 = s.match(/0x[0-9a-fA-F]{128}/);
   if (m64?.[0]) return m64[0];
 
-  // carve from any longer hex blob
   const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
   if (mAny?.[0]) {
     const h = mAny[0];
@@ -198,7 +197,7 @@ function extractHexSigFromAny(raw) {
   }
 
   throw new Error(
-    `Signature invalid. Could not extract 64/65/66-byte hex signature from response (len=${s.length}).`
+    `Signature invalid. Could not extract 64/65/66-byte hex signature (len=${s.length}).`
   );
 }
 
@@ -215,23 +214,17 @@ function expandEip2098(sig64_hex) {
   const sFixed = sFirstByte + vs.slice(2);
 
   const vHex = v.toString(16).padStart(2, "0");
-  return `0x${r}${sFixed}${vHex}`; // 65-byte (132 chars)
+  return `0x${r}${sFixed}${vHex}`; // 65-byte
 }
 
-// If we ever receive a 66-byte (134 chars), reconstruct a real 65-byte from r/s + v(last byte-ish)
 function shrink66To65(sig66) {
-  // sig66 is 0x + 132 hex (134 chars)
-  const hex = String(sig66 || "");
+  const hex = sig66;
   const r = hex.slice(2, 66);
   const s = hex.slice(66, 130);
-
-  // some providers append 2 extra bytes; we treat the LAST byte as v-like
-  const tail2 = hex.slice(hex.length - 2);
-  const vRaw = parseInt(tail2, 16);
+  const vRaw = parseInt(hex.slice(132, 134), 16);
   const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
   const vHex = Number(v).toString(16).padStart(2, "0");
-
-  return `0x${r}${s}${vHex}`; // 65-byte (132 chars)
+  return `0x${r}${s}${vHex}`;
 }
 
 function decode65(sig65) {
@@ -243,26 +236,20 @@ function decode65(sig65) {
   return { v: Number(v), r, s };
 }
 
-// normalize any signature into:
-// - signature65: ALWAYS 65-byte hex string (132 chars total)
-// - v/r/s: decoded from that 65-byte
 function normalizeSigTo65(sigLike) {
   const extracted = extractHexSigFromAny(sigLike);
 
-  // 64-byte compact
   if (extracted.length === 130) {
     const sig65 = expandEip2098(extracted);
     const { v, r, s } = decode65(sig65);
     return { signature: sig65, v, r, s };
   }
 
-  // 65-byte
   if (extracted.length === 132) {
     const { v, r, s } = decode65(extracted);
     return { signature: extracted, v, r, s };
   }
 
-  // 66-byte -> FORCE to 65-byte for relayer compatibility
   if (extracted.length === 134) {
     const sig65 = shrink66To65(extracted);
     const { v, r, s } = decode65(sig65);
@@ -274,20 +261,17 @@ function normalizeSigTo65(sigLike) {
   );
 }
 
-// Coinbase mobile fix:
-// Prefer viem signMessage({ raw }) so wallet signs BYTES, not "0x..." text.
-// Fallback to personal_sign (both param orders).
+// Coinbase mobile fix: prefer viem signMessage({ raw })
 async function signRawHash({ provider, chain, account, msgHash }) {
-  // 1) preferred: viem walletClient signMessage raw
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     return await wc.signMessage({
-      account, // can be Address string
-      message: { raw: msgHash }, // 0x + 32-byte hash
+      account,
+      message: { raw: msgHash },
     });
   } catch {}
 
-  // 2) fallback: personal_sign (param order differs)
+  // fallback: personal_sign (param order differs)
   try {
     return await provider.request({
       method: "personal_sign",
@@ -301,18 +285,16 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   }
 }
 
-// Verify signature matches user for the exact scheme used in Solidity:
-// ethSigned = toEthSignedMessageHash(msgHash)
 async function assertSignatureMatchesUser({ user, msgHash, v, r, s }) {
-  // Correct EIP-191 hash of RAW 32-byte msgHash
-  // Matches Solidity MessageHashUtils.toEthSignedMessageHash(bytes32)
   const ethSigned = hashMessage({ message: { raw: msgHash } });
+  const recovered = await recoverAddress({
+    hash: ethSigned,
+    signature: { v, r, s },
+  });
 
-  const recovered = await recoverAddress({ hash: ethSigned, signature: { v, r, s } });
   if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
     throw new Error(
-      `Bad signature (recovered ${recovered}). This wallet signed a DIFFERENT payload.\n` +
-        `Fix: reopen wallet prompt and approve signing. (Some wallets sign "0x..." as text in rare fallback paths.)\n`
+      `Bad signature (recovered ${recovered}). Wallet signed a different payload.`
     );
   }
 }
@@ -339,15 +321,11 @@ export async function getNickname(walletAddress) {
   return String(name || "");
 }
 
-/**
- * Gasless nickname (relayer pays gas)
- * ✅ Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC).
- */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
   if (!relayerUrl) {
     throw new Error(
-      "Missing VITE_RELAYER_URL — set it in Vercel + .env.local (example: https://theblock-relayer.fly.dev)."
+      "Missing VITE_RELAYER_URL — set it in Vercel + .env.local and restart/redeploy."
     );
   }
 
@@ -355,16 +333,20 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
 
   const trimmed = String(nick || "").trim();
-  if (trimmed.length < 3 || trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
+  if (trimmed.length < 3 || trimmed.length > 24)
+    throw new Error("Nickname must be 3–24 chars.");
 
-  const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
-  if (!provider?.request) {
+  const provider =
+    eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
+  if (!provider?.request)
     throw new Error("No wallet provider available for signing (EIP-1193 missing).");
-  }
 
   const chain = chainFromConfig();
   const rpc = resolveRpcUrl();
   const registry = await resolveRegistryAddress();
+
+  dbg("VITE_RELAYER_URL =", relayerUrl);
+  dbg("registry =", registry, "chainId =", Number(C.CHAIN_ID));
 
   const pc = createPublicClient({
     chain,
@@ -387,11 +369,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     args: [user],
   });
 
-  const nowSec = Math.floor(Date.now() / 1000);
-  const deadline = nowSec + 600;
-
-  const chainIdNum = Number(C.CHAIN_ID || chain?.id || 0);
-  if (!chainIdNum) throw new Error("Missing CHAIN_ID in config.");
+  const deadline = Math.floor(Date.now() / 1000) + 600;
 
   const msgHash = nicknameMsgHash({
     user,
@@ -399,55 +377,42 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     nonce,
     deadline,
     registry,
-    chainId: chainIdNum,
+    chainId: Number(C.CHAIN_ID),
   });
 
-  // ✅ Sign raw 32-byte hash (Coinbase mobile-safe)
-  let rawSig;
-  try {
-    rawSig = await signRawHash({ provider, chain, account: user, msgHash });
-  } catch (e) {
-    throw new Error(`Wallet signing failed: ${e?.shortMessage || e?.message || e}`);
-  }
+  const rawSig = await signRawHash({ provider, chain, account: user, msgHash });
+  const { signature, v, r, s } = normalizeSigTo65(rawSig);
 
-  // ✅ Normalize to 65-byte signature ONLY (relayer compatible)
-  let signature, v, r, s;
+  await assertSignatureMatchesUser({ user, msgHash, v, r, s });
+
+  let res;
   try {
-    ({ signature, v, r, s } = normalizeSigTo65(rawSig));
+    res = await fetch(`${relayerUrl}/relay/nickname`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user, nick: trimmed, deadline, v, r, s, signature }),
+    });
   } catch (e) {
+    // This is the big one when browser fails but Node works (CORS / network / blocked)
     throw new Error(
-      `Signature normalize failed: ${e?.message || e}\n` +
-        `Got: ${typeof rawSig === "string" ? `string(len=${rawSig.length})` : typeof rawSig}`
+      `Relayer request failed (network/CORS): ${e?.message || e}\n` +
+        `Check relayer CORS allows your UI origin (https://theblock.vip and http://localhost:5173).`
     );
   }
 
-  // ✅ Verify locally before sending to relayer (prevents “signed different payload” bugs)
-  await assertSignatureMatchesUser({ user, msgHash, v, r, s });
-
-  const res = await fetch(`${relayerUrl}/relay/nickname`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      user,
-      nick: trimmed,
-      deadline,
-      // relayer accepts either (v,r,s) OR signature — we send BOTH safely.
-      v,
-      r,
-      s,
-      signature, // ALWAYS 65-byte now (132 chars)
-    }),
-  });
-
-  const text = await res.text();
-  let j = null;
-  try {
-    j = JSON.parse(text);
-  } catch {}
+  const text = await res.text().catch(() => "");
+  const j = (() => {
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      return null;
+    }
+  })();
 
   if (!res.ok || !j?.ok) {
-    if (res.status === 404) throw new Error(`Relayer 404 at ${relayerUrl}/relay/nickname`);
-    throw new Error(j?.error || j?.message || text || `Relayer nickname failed (HTTP ${res.status})`);
+    // surface the real error string
+    const errMsg = j?.error || text || `Relayer nickname failed (HTTP ${res.status})`;
+    throw new Error(errMsg);
   }
 
   return j;
