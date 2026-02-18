@@ -221,22 +221,39 @@ function decode65(sig65) {
 function normalizeSigTo65(sigLike) {
   const extracted = extractHexSigFromAny(sigLike);
 
-  if (extracted.length === 130) {
-    const sig65 = expandEip2098(extracted);
-    const { v, r, s } = decode65(sig65);
-    return { signature: sig65, v, r, s };
+  if (!extracted || typeof extracted !== "string") {
+    throw new Error("Invalid signature: empty or non-string.");
   }
-  if (extracted.length === 132) {
-    const { v, r, s } = decode65(extracted);
-    return { signature: extracted, v, r, s };
+
+  const hex = extracted.trim();
+
+  if (!hex.startsWith("0x")) {
+    throw new Error("Invalid signature format (missing 0x).");
   }
-  if (extracted.length === 134) {
-    const sig65 = shrink66To65(extracted);
+
+  const len = hex.length;
+
+  // 64-byte compact (0x + 128 hex)
+  if (len === 130) {
+    const sig65 = expandEip2098(hex);
     const { v, r, s } = decode65(sig65);
     return { signature: sig65, v, r, s };
   }
 
-  throw new Error(`Signature invalid length (${extracted.length}).`);
+  // 65-byte normal (0x + 130 hex)
+  if (len === 132) {
+    const { v, r, s } = decode65(hex);
+    return { signature: hex, v, r, s };
+  }
+
+  // 66-byte weird (0x + 132 hex)
+  if (len === 134) {
+    const sig65 = shrink66To65(hex);
+    const { v, r, s } = decode65(sig65);
+    return { signature: sig65, v, r, s };
+  }
+
+  throw new Error(`Signature invalid length (${len}).`);
 }
 
 // Always return a signature HEX STRING or throw
