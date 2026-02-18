@@ -1,3 +1,4 @@
+// src/components/WalletConnectButton.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWallet } from "../context/WalletContext";
 
@@ -73,6 +74,9 @@ export default function WalletConnectButton({
   const [localErr, setLocalErr] = useState("");
   const rootRef = useRef(null);
 
+  // ✅ NEW: ref to force the scroll container to top on open
+  const sheetScrollRef = useRef(null);
+
   const toast = (msg) => typeof onToast === "function" && onToast(msg);
 
   const bubbleErr = (msg) => {
@@ -120,11 +124,34 @@ export default function WalletConnectButton({
   useEffect(() => {
     if (!isMobile) return;
     if (!open) return;
-    const prev = document.body.style.overflow;
+
+    const prevOverflow = document.body.style.overflow;
+    const prevTouchAction = document.body.style.touchAction;
+
     document.body.style.overflow = "hidden";
+    // ✅ helps on some mobile browsers so gestures don’t get weird
+    document.body.style.touchAction = "none";
+
     return () => {
-      document.body.style.overflow = prev;
+      document.body.style.overflow = prevOverflow;
+      document.body.style.touchAction = prevTouchAction;
     };
+  }, [open, isMobile]);
+
+  // ✅ NEW: force sheet content to top whenever it opens (mobile only)
+  useEffect(() => {
+    if (!isMobile) return;
+    if (!open) return;
+
+    // wait one paint so the element exists + layout finished
+    requestAnimationFrame(() => {
+      try {
+        if (sheetScrollRef.current) {
+          sheetScrollRef.current.scrollTop = 0;
+          sheetScrollRef.current.scrollTo?.({ top: 0, behavior: "auto" });
+        }
+      } catch {}
+    });
   }, [open, isMobile]);
 
   const buttonCls =
@@ -179,10 +206,7 @@ export default function WalletConnectButton({
       {open && isMobile ? (
         <>
           {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-[60] bg-black/55"
-            onClick={() => setOpen(false)}
-          />
+          <div className="fixed inset-0 z-[60] bg-black/55" onClick={() => setOpen(false)} />
 
           {/* Sheet */}
           <div className="fixed left-0 right-0 bottom-0 z-[61] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl">
@@ -199,7 +223,15 @@ export default function WalletConnectButton({
               </button>
             </div>
 
-            <div className="max-h-[70vh] overflow-auto border-t border-slate-800/70">
+            {/* ✅ FIX: make this area reliably scrollable on phones */}
+            <div
+              ref={sheetScrollRef}
+              className="max-h-[70vh] overflow-y-auto border-t border-slate-800/70"
+              style={{
+                WebkitOverflowScrolling: "touch",
+                touchAction: "pan-y",
+              }}
+            >
               {!isConnected ? (
                 <>
                   <button
@@ -393,3 +425,4 @@ export default function WalletConnectButton({
     </div>
   );
 }
+
