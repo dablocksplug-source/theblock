@@ -210,8 +210,7 @@ const allowlist = new Set<string>([
 
   "https://theblock.live",
   "https://www.theblock.live",
-  "https://theblock.vercel.app",
-  "https://theblock-n2xy.vercel.app",
+  
 ]);
 
 if (UI_ORIGIN) allowlist.add(UI_ORIGIN);
@@ -927,7 +926,15 @@ app.post("/relay/nickname", async (req, res) => {
       throw new Error("Relayer missing/invalid NICKNAME_REGISTRY_ADDRESS");
     }
 
-    const body = NicknameSchema.parse(req.body);
+    // ✅ accept older client keys (wallet/nickname)
+    const rawIn = req.body && typeof req.body === "object" ? req.body : {};
+    const merged = {
+      ...rawIn,
+      user: rawIn.user ?? rawIn.wallet,
+      nick: rawIn.nick ?? rawIn.nickname,
+    };
+
+    const body = NicknameSchema.parse(merged);
 
     const user = mustAddress(body.user, "user");
     const deadline = mustUintSeconds(body.deadline as any, "deadline");
@@ -951,6 +958,7 @@ app.post("/relay/nickname", async (req, res) => {
     return sendJson(res, { ok: false, error: msg }, 400);
   }
 });
+
 
 app.post("/relay/buy", async (req, res) => {
   try {
