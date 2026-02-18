@@ -288,13 +288,33 @@ async function signRawHash({ provider, chain, account, msgHash }) {
 
 // ✅ Verify using SIGNATURE HEX (avoid v/r/s object pitfalls)
 async function assertSignatureMatchesUser({ user, msgHash, signature }) {
-  const ethSigned = hashMessage({ message: { raw: msgHash } });
-  const recovered = await recoverAddress({ hash: ethSigned, signature });
-  if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
-    throw new Error(
-      `Bad signature (recovered ${recovered}). Wallet signed a DIFFERENT payload.\n` +
-        `Fix: reopen wallet prompt and approve signing.`
-    );
+  const sig = signature;
+
+  // HARD GUARDS so we never crash with "reading length"
+  if (typeof sig !== "string") {
+    throw new Error(`Signature is not a string (got ${typeof sig}).`);
+  }
+  if (!sig.startsWith("0x")) {
+    throw new Error(`Signature missing 0x prefix.`);
+  }
+  if (!/^0x[0-9a-fA-F]+$/.test(sig)) {
+    throw new Error(`Signature is not hex.`);
+  }
+  if (sig.length !== 132) {
+    // 65-byte signature: 0x + 130 hex = 132 total chars
+    throw new Error(`Signature wrong length (got ${sig.length}, expected 132).`);
+  }
+
+  try {
+    // Solidity uses toEthSignedMessageHash(bytes32)
+    const ethSigned = hashMessage({ message: { raw: msgHash } });
+    const recovered = await recoverAddress({ hash: ethSigned, signature: sig });
+
+    if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
+      throw new Error(`Bad signature (recovered ${recovered}). Wallet signed a different payload.`);
+    }
+  } catch (e) {
+    throw new Error(`Signature verify failed: ${e?.shortMessage || e?.message || String(e)}`);
   }
 }
 

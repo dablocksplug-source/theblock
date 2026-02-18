@@ -27,7 +27,13 @@ function envBool(v) {
 function errToString(e) {
   if (!e) return "Unknown error";
   if (typeof e === "string") return e;
-  return String(e?.shortMessage || e?.message || e);
+  const msg = e?.shortMessage || e?.message;
+  if (msg) return String(msg);
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
 }
 
 export function NicknameProvider({ children }) {
