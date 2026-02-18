@@ -9,6 +9,8 @@ import {
   keccak256,
   encodeAbiParameters,
   parseAbiParameters,
+  signatureToHex,
+  toHex,
   toBytes,
   recoverAddress,
   hashMessage,
@@ -20,19 +22,6 @@ function sanitizeUrl(u) {
     .trim()
     .replace(/^"+|"+$/g, "")
     .replace(/\s+/g, "");
-}
-
-function envBool(v) {
-  const s = String(v || "").trim().toLowerCase();
-  return s === "1" || s === "true" || s === "yes" || s === "on";
-}
-
-function dbgEnabled() {
-  return envBool(import.meta.env.VITE_DEBUG_NICKNAME);
-}
-
-function dlog(...args) {
-  if (dbgEnabled()) console.log("[nicknameAPI]", ...args);
 }
 
 function chainFromConfig() {
@@ -58,7 +47,7 @@ function resolveRelayerUrl() {
   ).replace(/\/+$/, "");
 }
 
-// --- NicknameRegistryRelayed ABI ---
+// --- minimal NicknameRegistry ABI ---
 const NICK_ABI = [
   {
     type: "function",
@@ -74,7 +63,15 @@ const NICK_ABI = [
     inputs: [{ name: "user", type: "address" }],
     outputs: [{ type: "uint256" }],
   },
-  // direct write fallback (if your contract supports it)
+];
+
+// Optional view
+const NICK_RELAYER_VIEW_ABI = [
+  { type: "function", name: "relayer", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+];
+
+// Direct write fallback (only if your contract supports it)
+const NICK_DIRECT_ABI = [
   {
     type: "function",
     name: "setNickname",
@@ -103,16 +100,14 @@ async function resolveRegistryAddress() {
 
       if (fromJson && isAddress(fromJson)) return fromJson;
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 
-  throw new Error("Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS.");
+  throw new Error("Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS in Vercel + .env.local.");
 }
 
 /**
- * MUST match Solidity:
- * keccak256(abi.encode(
+ * MUST match Solidity exactly:
+ * msgHash = keccak256(abi.encode(
  *   keccak256("NICKNAME_SET"),
  *   user,
  *   keccak256(bytes(nick)),
@@ -123,7 +118,7 @@ async function resolveRegistryAddress() {
  * ))
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
-  const tag = keccak256(toBytes("NICKNAME_SET"));
+  const tag = keccak256(toHex("NICKNAME_SET"));
   const nickHash = keccak256(toBytes(String(nick || "")));
 
   return keccak256(
@@ -135,8 +130,7 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 }
 
 // -------------------------------
-// Signature normalization helpers
-// Always normalize to 65-byte hex signature: 0x + 130 hex chars (length 132 total)
+// SIGNATURE NORMALIZATION (no crashes)
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -147,11 +141,27 @@ function extractHexSigFromAny(raw) {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
     if (raw.result) return extractHexSigFromAny(raw.result);
     if (raw.data) return extractHexSigFromAny(raw.data);
+
+    const r = raw.r || raw.R;
+    const s = raw.s || raw.S;
+    const v = raw.v ?? raw.V;
+    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
+
+    if (r && s && (v != null || yParity != null)) {
+      const hex = signatureToHex({
+        r,
+        s,
+        ...(v != null ? { v: BigInt(Number(v)) } : {}),
+        ...(v == null && yParity != null ? { yParity: Number(yParity) } : {}),
+      });
+      return extractHexSigFromAny(hex);
+    }
+
     raw = JSON.stringify(raw);
   }
 
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
-  if (!s || s === "0x") throw new Error("Signature missing/blocked (wallet returned empty).");
+  if (!s || s === "0x") throw new Error("Signature missing/blocked (empty). Approve the signature prompt and retry.");
 
   if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
 
@@ -175,38 +185,35 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature (len=${s.length}).`);
 }
 
-function expandEip2098(sig64_hex) {
-  // 0x + 128 hex (130 chars total)
-  const s = sig64_hex;
-  const r = s.slice(2, 66);
-  const vs = s.slice(66);
+// 64-byte compact EIP-2098 -> 65-byte
+function expandEip2098(sig64) {
+  const r = sig64.slice(2, 66);
+  const vs = sig64.slice(66);
 
-  const vsFirstByte = parseInt(vs.slice(0, 2), 16);
-  const v = (vsFirstByte & 0x80) ? 28 : 27;
+  const vsFirst = parseInt(vs.slice(0, 2), 16);
+  const v = (vsFirst & 0x80) ? 28 : 27;
 
-  const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
-  const sFixed = sFirstByte + vs.slice(2);
+  const sFirst = (vsFirst & 0x7f).toString(16).padStart(2, "0");
+  const sFixed = sFirst + vs.slice(2);
 
   const vHex = v.toString(16).padStart(2, "0");
-  return `0x${r}${sFixed}${vHex}`; // 65-byte, length 132
+  return `0x${r}${sFixed}${vHex}`;
 }
 
+// 66-byte weird -> 65-byte
 function shrink66To65(sig66) {
-  // 0x + 132 hex (134 chars total) -> take r(32) + s(32) + v(last byte)
-  const hex = sig66;
-  const r = hex.slice(2, 66);
-  const s = hex.slice(66, 130);
-  const vRaw = parseInt(hex.slice(132, 134), 16);
+  const r = sig66.slice(2, 66);
+  const s = sig66.slice(66, 130);
+  const vRaw = parseInt(sig66.slice(132, 134), 16);
   const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
   const vHex = Number(v).toString(16).padStart(2, "0");
-  return `0x${r}${s}${vHex}`; // 65-byte, length 132
+  return `0x${r}${s}${vHex}`;
 }
 
 function decode65(sig65) {
-  const hex = sig65;
-  const r = `0x${hex.slice(2, 66)}`;
-  const s = `0x${hex.slice(66, 130)}`;
-  const vRaw = parseInt(hex.slice(130, 132), 16);
+  const r = `0x${sig65.slice(2, 66)}`;
+  const s = `0x${sig65.slice(66, 130)}`;
+  const vRaw = parseInt(sig65.slice(130, 132), 16);
   const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
   return { v: Number(v), r, s };
 }
@@ -231,13 +238,13 @@ function normalizeSigTo65(sigLike) {
     return { signature: sig65, v, r, s };
   }
 
-  throw new Error(`Signature invalid length (${extracted.length}).`);
+  throw new Error(`Signature invalid length after extraction: ${extracted.length}.`);
 }
 
+// Prefer viem signMessage({ raw }) to sign bytes32
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
-  // Preferred: viem signMessage({ raw }) so wallet signs BYTES not "0x..." text
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     const sig = await wc.signMessage({ account, message: { raw: msgHash } });
@@ -246,7 +253,6 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     lastErr = e;
   }
 
-  // Fallback: personal_sign (param order varies)
   try {
     const sig = await provider.request({ method: "personal_sign", params: [msgHash, account] });
     return extractHexSigFromAny(sig);
@@ -264,14 +270,16 @@ async function signRawHash({ provider, chain, account, msgHash }) {
 }
 
 async function assertSignatureMatchesUser({ user, msgHash, v, r, s }) {
-  // Solidity: toEthSignedMessageHash(bytes32)
   const ethSigned = hashMessage({ message: { raw: msgHash } });
   const recovered = await recoverAddress({ hash: ethSigned, signature: { v, r, s } });
   if (String(recovered).toLowerCase() !== String(user).toLowerCase()) {
-    throw new Error(`Bad signature (recovered ${recovered}). Wallet signed a different payload.`);
+    throw new Error(`Bad signature (recovered ${recovered}). Re-open wallet prompt and approve signing.`);
   }
 }
 
+// -------------------------------
+// API
+// -------------------------------
 export async function getNickname(walletAddress) {
   if (!walletAddress || !isAddress(walletAddress)) return "";
 
@@ -299,7 +307,7 @@ export async function getNickname(walletAddress) {
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
-  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL.");
+  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL — set it in Vercel + .env.local.");
 
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
@@ -308,7 +316,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   if (trimmed.length < 3 || trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
 
   const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
-  if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 missing).");
+  if (!provider?.request) throw new Error("No wallet provider available for signing.");
 
   const chain = chainFromConfig();
   const rpc = resolveRpcUrl();
@@ -318,6 +326,11 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     chain,
     transport: http(rpc, { timeout: 20_000, retryCount: 1, retryDelay: 450 }),
   });
+
+  // optional sanity
+  try {
+    await pc.readContract({ address: registry, abi: NICK_RELAYER_VIEW_ABI, functionName: "relayer" });
+  } catch {}
 
   const nonce = await pc.readContract({
     address: registry,
@@ -337,48 +350,36 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     chainId: Number(C.CHAIN_ID),
   });
 
-  dlog("env", { relayerUrl, registry, chainId: Number(C.CHAIN_ID) });
-  dlog("hash", { nonce: String(nonce), deadline, msgHash });
-
   const rawSigHex = await signRawHash({ provider, chain, account: user, msgHash });
-  dlog("signed", { rawSigLen: rawSigHex ? rawSigHex.length : "(empty)" });
+  if (!rawSigHex || typeof rawSigHex !== "string") throw new Error("Wallet returned an empty signature.");
 
   const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
-  dlog("normalized", { sigLen: signature ? signature.length : "(empty)", v, r, s });
 
   await assertSignatureMatchesUser({ user, msgHash, v, r, s });
 
-  let res;
-  let txt = "";
-  try {
-    res = await fetch(`${relayerUrl}/relay/nickname`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user, nick: trimmed, deadline, v, r, s, signature }),
-    });
-    txt = await res.text();
-  } catch (netErr) {
-    throw new Error(`Relayer network error: ${netErr?.message || netErr}`);
-  }
+  const res = await fetch(`${relayerUrl}/relay/nickname`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user, nick: trimmed, deadline, v, r, s, signature }),
+  });
 
+  const txt = await res.text();
   let j = null;
   try {
     j = txt ? JSON.parse(txt) : null;
-  } catch {
-    j = null;
-  }
+  } catch {}
 
   if (!res.ok || !j?.ok) {
-    const serverMsg = j?.error || txt || `HTTP ${res.status}`;
-    throw new Error(`Relayer nickname failed: ${serverMsg}`);
+    if (res.status === 404) throw new Error(`Relayer 404 at ${relayerUrl}/relay/nickname`);
+    throw new Error(j?.error || `Relayer nickname failed (HTTP ${res.status}): ${txt || "(empty)"}`);
   }
 
   return j;
 }
 
 /**
- * Direct nickname write (fallback if VITE_ALLOW_DIRECT_NICKNAME=1)
- * Requires wallet to pay gas.
+ * Direct nickname write (wallet pays gas)
+ * Only used if VITE_ALLOW_DIRECT_NICKNAME=1
  */
 export async function setNicknameDirect(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
@@ -388,21 +389,19 @@ export async function setNicknameDirect(nick, walletAddress, eip1193Provider) {
   if (trimmed.length < 3 || trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
 
   const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
-  if (!provider?.request) throw new Error("No wallet provider available (EIP-1193 missing).");
+  if (!provider?.request) throw new Error("No wallet provider available.");
 
   const chain = chainFromConfig();
   const registry = await resolveRegistryAddress();
 
-  const wc = createWalletClient({
-    chain,
-    account: user,
-    transport: custom(provider),
-  });
+  const wc = createWalletClient({ chain, transport: custom(provider) });
 
-  // NOTE: assumes your contract has setNickname(string)
+  // This requires your contract to have setNickname(string).
+  // If not, you’ll get a clean revert error (not a JS crash).
   const hash = await wc.writeContract({
+    account: user,
     address: registry,
-    abi: NICK_ABI,
+    abi: NICK_DIRECT_ABI,
     functionName: "setNickname",
     args: [trimmed],
   });
