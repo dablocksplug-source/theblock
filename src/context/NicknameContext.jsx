@@ -1,11 +1,7 @@
 // src/context/NicknameContext.jsx
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useWallet } from "./WalletContext";
-import {
-  setNicknameDirect,
-  setNicknameRelayed,
-  getNickname,
-} from "../utils/nicknameAPI";
+import { setNicknameDirect, setNicknameRelayed, getNickname } from "../utils/nicknameAPI";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const STORAGE_KEY = "theblock_nickname_settings_v2";
@@ -68,10 +64,7 @@ export function NicknameProvider({ children }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ useNickname, nicknames: nicknamesByAddr })
-      );
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ useNickname, nicknames: nicknamesByAddr }));
     } catch (err) {
       console.error("Failed to save nickname settings:", err);
     }
@@ -98,7 +91,6 @@ export function NicknameProvider({ children }) {
   // on wallet connect/change, try to read chain nickname once
   useEffect(() => {
     if (!walletAddress) return;
-
     let cancelled = false;
 
     (async () => {
@@ -149,8 +141,8 @@ export function NicknameProvider({ children }) {
 
     if (!walletAddress || !isConnected) throw new Error("Connect your wallet first.");
     if (!trimmed) throw new Error("Enter a nickname first.");
-    if (trimmed.length < 3) throw new Error("Name too short.");
-    if (trimmed.length > 24) throw new Error("Name too long (max 24).");
+    if (trimmed.length < 3) throw new Error("Nickname must be 3–24 chars.");
+    if (trimmed.length > 24) throw new Error("Nickname must be 3–24 chars.");
 
     setLoading(true);
     try {
