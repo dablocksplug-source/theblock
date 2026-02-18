@@ -135,7 +135,6 @@ function clearOverrideProvider() {
 }
 
 function pickEip1193Provider() {
-  // ✅ prefer ACTIVE connector provider (WalletContext)
   if (__overrideProvider && typeof __overrideProvider.request === "function") return __overrideProvider;
 
   const eth = window?.ethereum;
@@ -197,7 +196,6 @@ const SUPA_ENABLED =
   !!SUPABASE_ANON &&
   !["0", "false", "off"].includes(String(import.meta.env.VITE_SUPABASE_ENABLED || "1").toLowerCase().trim());
 
-// singleton supabase client (prevents multiple GoTrue clients in dev/hmr)
 function getSupabaseSingleton() {
   try {
     if (!SUPA_ENABLED) return null;
@@ -261,10 +259,15 @@ function nowMs() {
 }
 
 function toBn6(amountStr) {
-  return parseUnits(String(amountStr || "0"), 6);
+  // IMPORTANT: reject empty/undefined early so admin UI doesn’t silently become 0
+  const s = String(amountStr ?? "").trim();
+  if (!s) return 0n;
+  return parseUnits(s, 6);
 }
 function toBn18(amountStr) {
-  return parseUnits(String(amountStr || "0"), 18);
+  const s = String(amountStr ?? "").trim();
+  if (!s) return 0n;
+  return parseUnits(s, 18);
 }
 
 const OUNCES_PER_BRICK = Number(C.OUNCES_PER_BRICK || 36);
@@ -274,19 +277,6 @@ function costRoundedUp(ozWei, pricePerBrick6) {
   const denom = BigInt(OUNCES_PER_BRICK) * OZ_WEI;
   const numer = ozWei * pricePerBrick6;
   return (numer + denom - 1n) / denom;
-}
-
-function shortAddr(a) {
-  return a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
-}
-
-// label helper
-function labelOrShort(addr) {
-  if (!addr) return "—";
-  const k = String(addr).toLowerCase();
-  const lbl = __labels?.[k];
-  if (lbl && String(lbl).trim()) return String(lbl).trim();
-  return shortAddr(addr);
 }
 
 async function safeRead(promise, fallback) {
@@ -350,10 +340,6 @@ function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
-// Extract a hex signature from many wallet return formats:
-// - string
-// - { result }, { signature }, { data }
-// - { r,s,v } / { r,s,yParity }
 function extractHexSigFromAny(raw) {
   if (raw && typeof raw === "object") {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
@@ -381,11 +367,8 @@ function extractHexSigFromAny(raw) {
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
-  // 65-byte = 0x + 130 hex => 132 chars
-  // 64-byte = 0x + 128 hex => 130 chars
   if (isHexOnly(s) && (s.length === 130 || s.length === 132)) return s;
 
-  // search inside text blobs
   const m65 = s.match(/0x[0-9a-fA-F]{130}/);
   if (m65?.[0]) return m65[0];
 
@@ -402,23 +385,16 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
 }
 
-// Expand 64-byte EIP-2098 => 65-byte (add v)
 function expandCompactSig(sigLike) {
   const s = extractHexSigFromAny(sigLike);
-
-  // already 65-byte
   if (s.length === 132) return s;
-
-  // must be 64-byte compact
-  if (s.length !== 130) {
-    throw new Error(`Invalid signature length: ${s.length} (expected 130 compact or 132 full).`);
-  }
+  if (s.length !== 130) throw new Error(`Invalid signature length: ${s.length} (expected 130 compact or 132 full).`);
 
   const r = s.slice(2, 66);
   const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
-  const v = (vsFirstByte & 0x80) ? 28 : 27;
+  const v = vsFirstByte & 0x80 ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
   const sFixed = sFirstByte + vs.slice(2);
@@ -435,9 +411,6 @@ function assertSig(label, sigLike) {
   return full;
 }
 
-// Coinbase mobile safe signer:
-// Prefer walletClient.signMessage({ raw }) => bytes signing.
-// Fallback to personal_sign if needed.
 async function signRawHash({ provider, chain, account, msgHash }) {
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
@@ -455,7 +428,6 @@ async function signRawHash({ provider, chain, account, msgHash }) {
 // Exported adapter
 // -------------------------------
 export const blockswapAdapter = {
-  // ✅ called from NicknameContext / WalletContext
   setProvider(p) {
     setOverrideProvider(p);
   },
@@ -466,7 +438,6 @@ export const blockswapAdapter = {
     clearOverrideProvider();
   },
 
-  // label cache (UI-only convenience)
   setLabel({ walletAddress, label }) {
     if (!walletAddress) return;
     const k = String(walletAddress).toLowerCase();
@@ -536,6 +507,167 @@ export const blockswapAdapter = {
   },
 
   // -------------------------------
+  // ✅ ADMIN: pause buys
+  // -------------------------------
+  async adminSetBuyPaused({ walletAddress, paused }) {
+    const { SWAP } = await resolveAddresses();
+    if (!walletAddress) throw new Error("Connect wallet.");
+
+    const wc = this._walletClient();
+    const v = !!paused;
+
+    const candidates = [
+      { fn: "adminSetBuyPaused", args: [v] },
+      { fn: "setBuyPaused", args: [v] },
+      { fn: "setPaused", args: [v] },
+      { fn: "setBuyPause", args: [v] },
+    ];
+
+    let lastErr = null;
+    for (const c of candidates) {
+      try {
+        const hash = await wc.writeContract({
+          account: walletAddress,
+          address: SWAP,
+          abi: BlockSwap.abi,
+          functionName: c.fn,
+          args: c.args,
+        });
+        return { hash, functionName: c.fn };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw new Error(lastErr?.shortMessage || lastErr?.message || "adminSetBuyPaused failed (ABI mismatch).");
+  },
+
+  // -------------------------------
+  // ✅ ADMIN: set prices (accept BOTH param styles)
+  // Panel sends: sellPricePerBrick + buybackFloorPerBrick
+  // Adapter also accepts: sellPerBrick + floorPerBrick
+  // -------------------------------
+  async adminSetPrices(args) {
+    const { SWAP } = await resolveAddresses();
+    const walletAddress = args?.walletAddress;
+    if (!walletAddress) throw new Error("Connect wallet.");
+
+    // accept either naming scheme
+    const sellStr =
+      args?.sellPricePerBrick ??
+      args?.sellPerBrick ??
+      args?.sell ??
+      "";
+    const floorStr =
+      args?.buybackFloorPerBrick ??
+      args?.floorPerBrick ??
+      args?.floor ??
+      "";
+
+    const sell6 = toBn6(sellStr);
+    const floor6 = toBn6(floorStr);
+
+    if (sell6 <= 0n || floor6 <= 0n) throw new Error("Prices must be > 0.");
+    if (sell6 < floor6) throw new Error("Sell must be ≥ floor.");
+
+    const wc = this._walletClient();
+
+    const candidates = [
+      { fn: "adminSetPrices", args: [sell6, floor6] },
+      { fn: "setPrices", args: [sell6, floor6] },
+      { fn: "setSellAndFloor", args: [sell6, floor6] },
+      { fn: "setSellPriceAndFloor", args: [sell6, floor6] },
+    ];
+
+    let lastErr = null;
+    for (const c of candidates) {
+      try {
+        const hash = await wc.writeContract({
+          account: walletAddress,
+          address: SWAP,
+          abi: BlockSwap.abi,
+          functionName: c.fn,
+          args: c.args,
+        });
+        return { hash, functionName: c.fn };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw new Error(lastErr?.shortMessage || lastErr?.message || "adminSetPrices failed (ABI mismatch).");
+  },
+
+  // -------------------------------
+  // ✅ ADMIN: set treasury address
+  // -------------------------------
+  async adminSetTreasury({ walletAddress, treasury }) {
+    const { SWAP } = await resolveAddresses();
+    if (!walletAddress) throw new Error("Connect wallet.");
+    if (!isAddress(treasury)) throw new Error("Bad treasury address.");
+
+    const wc = this._walletClient();
+
+    const candidates = [
+      { fn: "adminSetTreasury", args: [treasury] },
+      { fn: "setTreasury", args: [treasury] },
+      { fn: "setTheBlockTreasury", args: [treasury] },
+    ];
+
+    let lastErr = null;
+    for (const c of candidates) {
+      try {
+        const hash = await wc.writeContract({
+          account: walletAddress,
+          address: SWAP,
+          abi: BlockSwap.abi,
+          functionName: c.fn,
+          args: c.args,
+        });
+        return { hash, functionName: c.fn };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw new Error(lastErr?.shortMessage || lastErr?.message || "adminSetTreasury failed (ABI mismatch).");
+  },
+
+  // -------------------------------
+  // ✅ ADMIN: set relayer address
+  // -------------------------------
+  async adminSetRelayer({ walletAddress, relayer }) {
+    const { SWAP } = await resolveAddresses();
+    if (!walletAddress) throw new Error("Connect wallet.");
+    if (!isAddress(relayer)) throw new Error("Bad relayer address.");
+
+    const wc = this._walletClient();
+
+    const candidates = [
+      { fn: "adminSetRelayer", args: [relayer] },
+      { fn: "setRelayer", args: [relayer] },
+      { fn: "setTrustedRelayer", args: [relayer] },
+    ];
+
+    let lastErr = null;
+    for (const c of candidates) {
+      try {
+        const hash = await wc.writeContract({
+          account: walletAddress,
+          address: SWAP,
+          abi: BlockSwap.abi,
+          functionName: c.fn,
+          args: c.args,
+        });
+        return { hash, functionName: c.fn };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw new Error(lastErr?.shortMessage || lastErr?.message || "adminSetRelayer failed (ABI mismatch).");
+  },
+
+  // -------------------------------
   // Snapshot (prices + vault + treasury)
   // -------------------------------
   async getSwapSnapshot() {
@@ -600,6 +732,9 @@ export const blockswapAdapter = {
       coverageDisplay = (Number(formatUnits(ratio6, 6)) || 0).toFixed(3);
     }
 
+    // solvent estimate (optional): vault >= liability
+    const isSolvent = floorLiabilityUSDC === 0n ? true : swapUsdcBal >= floorLiabilityUSDC;
+
     return {
       ts: nowMs(),
       chainId: Number(C.CHAIN_ID),
@@ -624,6 +759,8 @@ export const blockswapAdapter = {
 
       ounceSellPrice,
       ounceBuybackFloor,
+
+      isSolvent,
 
       fmt: {
         sellPerBrick: sellPerBrickStr,
@@ -813,24 +950,13 @@ export const blockswapAdapter = {
     const eip1193 = mustProvider();
     const wc = this._walletClient();
 
-    // ✅ BUY SIGNATURE: sign RAW bytes first (Coinbase mobile safe)
     let rawBuySig;
     try {
-      rawBuySig = await wc.signMessage({
-        account: walletAddress,
-        message: { raw: msgHash },
-      });
+      rawBuySig = await wc.signMessage({ account: walletAddress, message: { raw: msgHash } });
     } catch {
-      // fallback path uses personal_sign if needed
-      rawBuySig = await signRawHash({
-        provider: eip1193,
-        chain,
-        account: walletAddress,
-        msgHash,
-      });
+      rawBuySig = await signRawHash({ provider: eip1193, chain, account: walletAddress, msgHash });
     }
 
-    // Permit typed data
     const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
     const domain = {
       name: usdcName,
@@ -857,15 +983,8 @@ export const blockswapAdapter = {
       deadline: permitDeadline,
     };
 
-    const rawPermitSig = await wc.signTypedData({
-      account: walletAddress,
-      domain,
-      types,
-      primaryType: "Permit",
-      message,
-    });
+    const rawPermitSig = await wc.signTypedData({ account: walletAddress, domain, types, primaryType: "Permit", message });
 
-    // ✅ normalize signatures to 65-byte before POST
     const buySignature = assertSig("buySignature", rawBuySig);
     const permitSignature = assertSig("permitSignature", rawPermitSig);
 
@@ -878,7 +997,6 @@ export const blockswapAdapter = {
         ozWei: ozWei.toString(),
         buyDeadline: Number(buyDeadline),
         buySignature,
-
         permitValue: permitValue.toString(),
         permitDeadline: Number(permitDeadline),
         permitSignature,
@@ -888,9 +1006,7 @@ export const blockswapAdapter = {
     });
 
     if (!res.ok || !j?.ok) {
-      throw new Error(
-        j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`
-      );
+      throw new Error(j?.error || String(text || "").slice(0, 180) || `Relayer buy-permit failed (HTTP ${res.status})`);
     }
 
     return { hash: j.hash };
