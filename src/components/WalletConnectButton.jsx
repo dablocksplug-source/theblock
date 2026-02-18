@@ -1,4 +1,3 @@
-// src/components/WalletConnectButton.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWallet } from "../context/WalletContext";
 
@@ -72,10 +71,9 @@ export default function WalletConnectButton({
 
   const [open, setOpen] = useState(false);
   const [localErr, setLocalErr] = useState("");
-  const rootRef = useRef(null);
 
-  // ✅ NEW: ref to force the scroll container to top on open
-  const sheetScrollRef = useRef(null);
+  const rootRef = useRef(null);   // button wrapper
+  const sheetRef = useRef(null);  // ✅ mobile sheet wrapper
 
   const toast = (msg) => typeof onToast === "function" && onToast(msg);
 
@@ -102,56 +100,44 @@ export default function WalletConnectButton({
     return s.includes("walletconnect");
   });
 
-  // Close on outside click/tap (mobile-safe)
+  // ✅ Close on outside click/tap (mobile-safe)
+  // IMPORTANT: On mobile, the sheet is NOT inside rootRef, so we must also check sheetRef.
   useEffect(() => {
     function onDocPointerDown(e) {
-      if (!rootRef.current) return;
-      if (!rootRef.current.contains(e.target)) setOpen(false);
+      const t = e.target;
+      const inRoot = rootRef.current && rootRef.current.contains(t);
+      const inSheet = sheetRef.current && sheetRef.current.contains(t);
+
+      // If click is inside button OR inside sheet, do nothing.
+      if (inRoot || inSheet) return;
+
+      setOpen(false);
     }
+
     function onEsc(e) {
       if (e.key === "Escape") setOpen(false);
     }
 
-    document.addEventListener("pointerdown", onDocPointerDown, { passive: true });
+    document.addEventListener("pointerdown", onDocPointerDown);
     document.addEventListener("keydown", onEsc);
+
     return () => {
       document.removeEventListener("pointerdown", onDocPointerDown);
       document.removeEventListener("keydown", onEsc);
     };
   }, []);
 
-  // Optional: lock scroll ONLY while sheet is open (mobile only)
+  // ✅ Lock page scroll ONLY while mobile sheet is open
   useEffect(() => {
     if (!isMobile) return;
     if (!open) return;
 
     const prevOverflow = document.body.style.overflow;
-    const prevTouchAction = document.body.style.touchAction;
-
     document.body.style.overflow = "hidden";
-    // ✅ helps on some mobile browsers so gestures don’t get weird
-    document.body.style.touchAction = "none";
 
     return () => {
       document.body.style.overflow = prevOverflow;
-      document.body.style.touchAction = prevTouchAction;
     };
-  }, [open, isMobile]);
-
-  // ✅ NEW: force sheet content to top whenever it opens (mobile only)
-  useEffect(() => {
-    if (!isMobile) return;
-    if (!open) return;
-
-    // wait one paint so the element exists + layout finished
-    requestAnimationFrame(() => {
-      try {
-        if (sheetScrollRef.current) {
-          sheetScrollRef.current.scrollTop = 0;
-          sheetScrollRef.current.scrollTo?.({ top: 0, behavior: "auto" });
-        }
-      } catch {}
-    });
   }, [open, isMobile]);
 
   const buttonCls =
@@ -202,14 +188,28 @@ export default function WalletConnectButton({
         {chipLabel}
       </button>
 
-      {/* ===== MOBILE: bottom sheet (never off-screen) ===== */}
+      {/* ===== MOBILE: bottom sheet ===== */}
       {open && isMobile ? (
         <>
           {/* Backdrop */}
-          <div className="fixed inset-0 z-[60] bg-black/55" onClick={() => setOpen(false)} />
+          <div
+            className="fixed inset-0 z-[60] bg-black/55"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setOpen(false);
+            }}
+          />
 
           {/* Sheet */}
-          <div className="fixed left-0 right-0 bottom-0 z-[61] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl">
+          <div
+            ref={sheetRef}
+            className="fixed left-0 right-0 bottom-0 z-[61] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
+            onPointerDown={(e) => {
+              // ✅ prevent bubbling into document handler
+              e.stopPropagation();
+            }}
+          >
             <div className="flex items-center justify-between px-4 py-3">
               <div className="text-sm font-semibold text-slate-100">
                 {isConnected ? "Wallet" : "Connect"}
@@ -223,14 +223,9 @@ export default function WalletConnectButton({
               </button>
             </div>
 
-            {/* ✅ FIX: make this area reliably scrollable on phones */}
             <div
-              ref={sheetScrollRef}
               className="max-h-[70vh] overflow-y-auto border-t border-slate-800/70"
-              style={{
-                WebkitOverflowScrolling: "touch",
-                touchAction: "pan-y",
-              }}
+              style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
             >
               {!isConnected ? (
                 <>
@@ -327,7 +322,7 @@ export default function WalletConnectButton({
         </>
       ) : null}
 
-      {/* ===== DESKTOP: normal dropdown ===== */}
+      {/* ===== DESKTOP: dropdown ===== */}
       {open && !isMobile ? (
         <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
           {!isConnected ? (
@@ -425,4 +420,3 @@ export default function WalletConnectButton({
     </div>
   );
 }
-
