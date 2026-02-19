@@ -71,9 +71,7 @@ export default function WalletConnectButton({
 
   const [open, setOpen] = useState(false);
   const [localErr, setLocalErr] = useState("");
-
-  const rootRef = useRef(null);   // button wrapper
-  const sheetRef = useRef(null);  // ✅ mobile sheet wrapper
+  const rootRef = useRef(null);
 
   const toast = (msg) => typeof onToast === "function" && onToast(msg);
 
@@ -100,43 +98,39 @@ export default function WalletConnectButton({
     return s.includes("walletconnect");
   });
 
-  // ✅ Close on outside click/tap (mobile-safe)
-  // IMPORTANT: On mobile, the sheet is NOT inside rootRef, so we must also check sheetRef.
+  // ✅ Desktop outside click close only (mobile uses backdrop)
   useEffect(() => {
-    function onDocPointerDown(e) {
-      const t = e.target;
-      const inRoot = rootRef.current && rootRef.current.contains(t);
-      const inSheet = sheetRef.current && sheetRef.current.contains(t);
+    if (isMobile) return;
 
-      // If click is inside button OR inside sheet, do nothing.
-      if (inRoot || inSheet) return;
-
-      setOpen(false);
+    function onDocMouseDown(e) {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target)) setOpen(false);
     }
-
     function onEsc(e) {
       if (e.key === "Escape") setOpen(false);
     }
 
-    document.addEventListener("pointerdown", onDocPointerDown);
+    document.addEventListener("mousedown", onDocMouseDown);
     document.addEventListener("keydown", onEsc);
-
     return () => {
-      document.removeEventListener("pointerdown", onDocPointerDown);
+      document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onEsc);
     };
-  }, []);
+  }, [isMobile]);
 
-  // ✅ Lock page scroll ONLY while mobile sheet is open
+  // ✅ Lock page scroll ONLY while mobile sheet is open (iOS safe)
   useEffect(() => {
-    if (!isMobile) return;
-    if (!open) return;
+    if (!isMobile || !open) return;
 
-    const prevOverflow = document.body.style.overflow;
+    const prevOverflow = document.documentElement.style.overflow;
+    const prevBodyOverflow = document.body.style.overflow;
+
+    document.documentElement.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
 
     return () => {
-      document.body.style.overflow = prevOverflow;
+      document.documentElement.style.overflow = prevOverflow;
+      document.body.style.overflow = prevBodyOverflow;
     };
   }, [open, isMobile]);
 
@@ -146,7 +140,8 @@ export default function WalletConnectButton({
       : "rounded-lg px-3 py-1.5 text-xs font-semibold";
 
   const connectBtnCls =
-    "border border-cyan-400/30 text-cyan-200 hover:border-cyan-300/50 bg-slate-950/30 " + buttonCls;
+    "border border-cyan-400/30 text-cyan-200 hover:border-cyan-300/50 bg-slate-950/30 " +
+    buttonCls;
 
   const connectedBtnCls =
     "border bg-slate-950 text-slate-200 hover:border-slate-500 " + buttonCls;
@@ -166,6 +161,101 @@ export default function WalletConnectButton({
     }
   }
 
+  const SheetContent = (
+    <>
+      {!isConnected ? (
+        <>
+          <button
+            type="button"
+            className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900 active:bg-slate-900/80"
+            onClick={() => safeConnect(connectMetaMask, "MetaMask connect failed.")}
+          >
+            MetaMask
+          </button>
+
+          <button
+            type="button"
+            className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900 active:bg-slate-900/80"
+            onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
+          >
+            Coinbase Wallet
+          </button>
+
+          <button
+            type="button"
+            className={
+              "w-full px-4 py-3 text-left text-sm hover:bg-slate-900 active:bg-slate-900/80 " +
+              (canWC ? "text-slate-200" : "text-slate-500")
+            }
+            disabled={!canWC}
+            onClick={() => safeConnect(connectWalletConnect, "WalletConnect failed.")}
+          >
+            WalletConnect {canWC ? "" : "(not configured)"}
+          </button>
+
+          <div className="px-4 py-3 text-xs text-slate-400 border-t border-slate-800/70">
+            Pick a wallet — no auto-connect.
+          </div>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900 active:bg-slate-900/80"
+            onClick={async () => {
+              const ok = await copyToClipboard(String(walletAddress || ""));
+              if (ok) toast("Copied ✅");
+              setOpen(false);
+            }}
+          >
+            Copy address
+          </button>
+
+          {wrongChain && ensureChain ? (
+            <button
+              type="button"
+              className="w-full px-4 py-3 text-left text-sm text-rose-200 hover:bg-slate-900 active:bg-slate-900/80"
+              onClick={async () => {
+                try {
+                  setLocalErr("");
+                  await ensureChain(Number(targetChainId));
+                  toast("Network switched ✅");
+                  setOpen(false);
+                } catch (err) {
+                  bubbleErr(
+                    err?.message ||
+                      `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
+                  );
+                }
+              }}
+            >
+              Switch to chain {targetChainId}
+            </button>
+          ) : null}
+
+          <div className="border-t border-slate-800/70" />
+
+          <button
+            type="button"
+            className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900 active:bg-slate-900/80"
+            onClick={() => {
+              try {
+                setLocalErr("");
+                disconnectWallet?.();
+                toast("Disconnected");
+                setOpen(false);
+              } catch (err) {
+                bubbleErr(err?.message || "Disconnect failed.");
+              }
+            }}
+          >
+            Disconnect
+          </button>
+        </>
+      )}
+    </>
+  );
+
   return (
     <div ref={rootRef} className="relative">
       {localErr ? (
@@ -174,7 +264,6 @@ export default function WalletConnectButton({
         </div>
       ) : null}
 
-      {/* MAIN BUTTON */}
       <button
         type="button"
         className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
@@ -188,27 +277,24 @@ export default function WalletConnectButton({
         {chipLabel}
       </button>
 
-      {/* ===== MOBILE: bottom sheet ===== */}
+      {/* ===== MOBILE: bottom sheet with strict pointer handling ===== */}
       {open && isMobile ? (
-        <>
-          {/* Backdrop */}
+        <div className="fixed inset-0 z-[9999]">
+          {/* Backdrop: close on CLICK (more reliable than pointerdown on iOS) */}
           <div
-            className="fixed inset-0 z-[60] bg-black/55"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setOpen(false);
-            }}
+            className="absolute inset-0 bg-black/55"
+            style={{ pointerEvents: "auto" }}
+            onClick={() => setOpen(false)}
           />
 
           {/* Sheet */}
           <div
-            ref={sheetRef}
-            className="fixed left-0 right-0 bottom-0 z-[61] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
-            onPointerDown={(e) => {
-              // ✅ prevent bubbling into document handler
-              e.stopPropagation();
+            className="absolute left-0 right-0 bottom-0 rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
+            style={{
+              pointerEvents: "auto",
+              touchAction: "manipulation",
             }}
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3">
               <div className="text-sm font-semibold text-slate-100">
@@ -223,198 +309,26 @@ export default function WalletConnectButton({
               </button>
             </div>
 
+            {/* Scroll container */}
             <div
               className="max-h-[70vh] overflow-y-auto border-t border-slate-800/70"
-              style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
+              style={{
+                WebkitOverflowScrolling: "touch",
+                overscrollBehavior: "contain",
+                touchAction: "pan-y",
+              }}
+              onClick={(e) => e.stopPropagation()}
             >
-              {!isConnected ? (
-                <>
-                  <button
-                    type="button"
-                    className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900"
-                    onClick={() => safeConnect(connectMetaMask, "MetaMask connect failed.")}
-                  >
-                    MetaMask
-                  </button>
-
-                  <button
-                    type="button"
-                    className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900"
-                    onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
-                  >
-                    Coinbase Wallet
-                  </button>
-
-                  <button
-                    type="button"
-                    className={
-                      "w-full px-4 py-3 text-left text-sm hover:bg-slate-900 " +
-                      (canWC ? "text-slate-200" : "text-slate-500")
-                    }
-                    disabled={!canWC}
-                    onClick={() => safeConnect(connectWalletConnect, "WalletConnect failed.")}
-                  >
-                    WalletConnect {canWC ? "" : "(not configured)"}
-                  </button>
-
-                  <div className="px-4 py-3 text-xs text-slate-400 border-t border-slate-800/70">
-                    Pick a wallet — no auto-connect.
-                  </div>
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900"
-                    onClick={async () => {
-                      const ok = await copyToClipboard(String(walletAddress || ""));
-                      if (ok) toast("Copied ✅");
-                      setOpen(false);
-                    }}
-                  >
-                    Copy address
-                  </button>
-
-                  {wrongChain && ensureChain ? (
-                    <button
-                      type="button"
-                      className="w-full px-4 py-3 text-left text-sm text-rose-200 hover:bg-slate-900"
-                      onClick={async () => {
-                        try {
-                          setLocalErr("");
-                          await ensureChain(Number(targetChainId));
-                          toast("Network switched ✅");
-                          setOpen(false);
-                        } catch (err) {
-                          bubbleErr(
-                            err?.message ||
-                              `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
-                          );
-                        }
-                      }}
-                    >
-                      Switch to chain {targetChainId}
-                    </button>
-                  ) : null}
-
-                  <div className="border-t border-slate-800/70" />
-
-                  <button
-                    type="button"
-                    className="w-full px-4 py-3 text-left text-sm text-slate-200 hover:bg-slate-900"
-                    onClick={() => {
-                      try {
-                        setLocalErr("");
-                        disconnectWallet?.();
-                        toast("Disconnected");
-                        setOpen(false);
-                      } catch (err) {
-                        bubbleErr(err?.message || "Disconnect failed.");
-                      }
-                    }}
-                  >
-                    Disconnect
-                  </button>
-                </>
-              )}
+              {SheetContent}
             </div>
           </div>
-        </>
+        </div>
       ) : null}
 
       {/* ===== DESKTOP: dropdown ===== */}
       {open && !isMobile ? (
         <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
-          {!isConnected ? (
-            <>
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => safeConnect(connectMetaMask, "MetaMask connect failed.")}
-              >
-                MetaMask
-              </button>
-
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
-              >
-                Coinbase Wallet
-              </button>
-
-              <button
-                type="button"
-                className={
-                  "w-full px-4 py-2 text-left text-xs hover:bg-slate-900 " +
-                  (canWC ? "text-slate-200" : "text-slate-500")
-                }
-                disabled={!canWC}
-                onClick={() => safeConnect(connectWalletConnect, "WalletConnect failed.")}
-              >
-                WalletConnect {canWC ? "" : "(not configured)"}
-              </button>
-
-              <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
-                Pick a wallet — no auto-connect.
-              </div>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={async () => {
-                  const ok = await copyToClipboard(String(walletAddress || ""));
-                  if (ok) toast("Copied ✅");
-                  setOpen(false);
-                }}
-              >
-                Copy address
-              </button>
-
-              {wrongChain && ensureChain ? (
-                <button
-                  type="button"
-                  className="w-full px-4 py-2 text-left text-xs text-rose-200 hover:bg-slate-900"
-                  onClick={async () => {
-                    try {
-                      setLocalErr("");
-                      await ensureChain(Number(targetChainId));
-                      toast("Network switched ✅");
-                      setOpen(false);
-                    } catch (err) {
-                      bubbleErr(
-                        err?.message ||
-                          `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
-                      );
-                    }
-                  }}
-                >
-                  Switch to chain {targetChainId}
-                </button>
-              ) : null}
-
-              <div className="border-t border-slate-800/80" />
-
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => {
-                  try {
-                    setLocalErr("");
-                    disconnectWallet?.();
-                    toast("Disconnected");
-                    setOpen(false);
-                  } catch (err) {
-                    bubbleErr(err?.message || "Disconnect failed.");
-                  }
-                }}
-              >
-                Disconnect
-              </button>
-            </>
-          )}
+          {SheetContent}
         </div>
       ) : null}
     </div>
