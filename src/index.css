@@ -18,9 +18,10 @@ html, body {
   font-family: 'Inter', sans-serif;
 }
 
-* {
-  transition: all 0.15s ease-out;
+button, a, input, textarea {
+  transition: color 0.15s ease-out, background-color 0.15s ease-out, border-color 0.15s ease-out, box-shadow 0.15s ease-out, transform 0.15s ease-out;
 }
+
 
 /* =============================================== */
 /*                BUTTON STYLING                   */
