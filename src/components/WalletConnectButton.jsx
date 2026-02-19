@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useWallet } from "../context/WalletContext";
+import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
 
 const shortAddr = (a) =>
   a && a.length > 10 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a || "—";
@@ -68,6 +69,14 @@ export default function WalletConnectButton({
     availableConnectors,
   } = useWallet();
 
+  // ✅ Nickname controls live here now too
+  const {
+    nickname,
+    useNickname,
+    setUseNickname,
+    askForNickname,
+  } = useNicknameContext();
+
   const isMobile = useIsMobile(640);
 
   const [open, setOpen] = useState(false);
@@ -88,11 +97,21 @@ export default function WalletConnectButton({
     Number(chainId || 0) > 0 &&
     Number(chainId) !== Number(targetChainId);
 
+  const displayName = useMemo(() => {
+    return getDisplayName({ walletAddress, nickname, useNickname });
+  }, [walletAddress, nickname, useNickname]);
+
+  const hasNickname = useMemo(() => {
+    return String(nickname || "").trim().length > 0;
+  }, [nickname]);
+
   const chipLabel = useMemo(() => {
     if (!isConnected) return label;
     const addr = walletAddress ? shortAddr(walletAddress) : "—";
-    return `Wallet (${addr})`;
-  }, [isConnected, walletAddress, label]);
+    // show nickname if enabled + available, otherwise wallet short
+    const shown = useNickname && hasNickname ? String(nickname).trim() : addr;
+    return `Wallet (${shown})`;
+  }, [isConnected, walletAddress, label, useNickname, hasNickname, nickname]);
 
   const canWC = (availableConnectors || []).some((c) => {
     const s = `${c?.id || ""} ${c?.name || ""}`.toLowerCase();
@@ -147,17 +166,35 @@ export default function WalletConnectButton({
     }
   }
 
+  const doSetNickname = () => {
+    try {
+      setLocalErr("");
+      setOpen(false);
+      askForNickname?.();
+    } catch (e) {
+      bubbleErr(e?.message || "Could not open nickname modal.");
+    }
+  };
+
+  const doToggleNick = () => {
+    try {
+      setLocalErr("");
+      setUseNickname?.(!useNickname);
+      toast(!useNickname ? "Nickname ON" : "Address ON");
+    } catch (e) {
+      bubbleErr(e?.message || "Toggle failed.");
+    }
+  };
+
   const mobileSheet =
     open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
-            {/* Backdrop */}
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
               onClick={() => setOpen(false)}
             />
 
-            {/* Sheet */}
             <div className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl">
               <div className="flex items-center justify-between px-4 py-3">
                 <div className="text-sm font-semibold text-slate-100">
@@ -212,6 +249,32 @@ export default function WalletConnectButton({
                   </>
                 ) : (
                   <>
+                    {/* Small header line */}
+                    <div className="px-4 pt-4 pb-2 text-sm text-slate-300">
+                      Connected as{" "}
+                      <span className="font-semibold text-slate-100">
+                        {displayName || shortAddr(walletAddress)}
+                      </span>
+                    </div>
+
+                    {!hasNickname ? (
+                      <button
+                        type="button"
+                        className="w-full px-4 py-4 text-left text-base text-emerald-200 hover:bg-slate-900"
+                        onClick={doSetNickname}
+                      >
+                        Set Nickname
+                      </button>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      className="w-full px-4 py-4 text-left text-base text-slate-200 hover:bg-slate-900"
+                      onClick={doToggleNick}
+                    >
+                      {useNickname ? "Show Address Instead" : "Show Nickname Instead"}
+                    </button>
+
                     <button
                       type="button"
                       className="w-full px-4 py-4 text-left text-base text-slate-200 hover:bg-slate-900"
@@ -299,7 +362,7 @@ export default function WalletConnectButton({
 
       {/* DESKTOP DROPDOWN */}
       {open && !isMobile ? (
-        <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
+        <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
           {!isConnected ? (
             <>
               <button
@@ -333,6 +396,31 @@ export default function WalletConnectButton({
             </>
           ) : (
             <>
+              <div className="px-4 py-2 text-[11px] text-slate-400">
+                Connected as{" "}
+                <span className="text-slate-200 font-semibold">
+                  {displayName || shortAddr(walletAddress)}
+                </span>
+              </div>
+
+              {!hasNickname ? (
+                <button
+                  type="button"
+                  className="w-full px-4 py-2 text-left text-xs text-emerald-200 hover:bg-slate-900"
+                  onClick={doSetNickname}
+                >
+                  Set Nickname
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+                onClick={doToggleNick}
+              >
+                {useNickname ? "Show Address Instead" : "Show Nickname Instead"}
+              </button>
+
               <button
                 type="button"
                 className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
