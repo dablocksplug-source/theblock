@@ -54,6 +54,36 @@ function resolveRelayerUrl() {
   ).replace(/\/+$/, "");
 }
 
+function isProbablyMobile() {
+  try {
+    const ua = (navigator?.userAgent || "").toLowerCase();
+    return ua.includes("android") || ua.includes("iphone") || ua.includes("ipad");
+  } catch {
+    return false;
+  }
+}
+
+function withTimeout(promise, ms, message) {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
+function toChainId(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return 0;
+  if (s.startsWith("0x")) {
+    const n = parseInt(s, 16);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 // --- minimal NicknameRegistryRelayed ABI ---
 const NICK_ABI = [
   {
@@ -110,8 +140,12 @@ async function resolveRegistryAddress() {
 }
 
 async function getWalletChainId(provider) {
-  const hex = await provider.request({ method: "eth_chainId", params: [] });
-  const n = Number(hex);
+  const hex = await withTimeout(
+    provider.request({ method: "eth_chainId", params: [] }),
+    12_000,
+    "Wallet did not respond to eth_chainId (timeout). Open your wallet app and try again."
+  );
+  const n = toChainId(hex);
   if (!Number.isFinite(n) || n <= 0) throw new Error("Could not read wallet chainId.");
   return n;
 }
@@ -127,8 +161,6 @@ async function getWalletChainId(provider) {
  *   address(this),
  *   chainid
  * ))
- *
- * NOTE: chainid MUST match the chain the relayer will submit to (RPC chainId).
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   const tag = keccak256(toBytes("NICKNAME_SET"));
@@ -144,7 +176,6 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 
 // -------------------------------
 // Signature normalization
-// Always normalize to v/r/s for relayer (supports 64/65/66 byte signatures).
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -159,7 +190,9 @@ function extractHexSigFromAny(raw) {
   }
 
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
-  if (!s || s === "0x") throw new Error("Signature missing/blocked (empty). Approve the wallet prompt and try again.");
+  if (!s || s === "0x") {
+    throw new Error("Signature missing/blocked (empty). Approve the wallet prompt and try again.");
+  }
 
   if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
 
@@ -181,7 +214,7 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature (len=${s.length}).`);
 }
 
-// 64-byte compact EIP-2098 -> 65-byte (append v at end)
+// 64-byte compact EIP-2098 -> 65-byte
 function expandEip2098(sig64_hex) {
   const s = sig64_hex; // 0x + 128 hex
   const r = s.slice(2, 66);
@@ -197,7 +230,7 @@ function expandEip2098(sig64_hex) {
   return `0x${r}${sFixed}${vHex}`;
 }
 
-// 66-byte weird -> 65-byte (use last byte as v)
+// 66-byte weird -> 65-byte
 function shrink66To65(sig66) {
   const hex = sig66;
   const r = hex.slice(2, 66);
@@ -219,30 +252,18 @@ function decode65(sig65) {
 
 function normalizeSigTo65(sigLike) {
   const extracted = extractHexSigFromAny(sigLike);
-
-  if (!extracted || typeof extracted !== "string") {
-    throw new Error("Invalid signature: empty or non-string.");
-  }
-
   const hex = extracted.trim();
-  if (!hex.startsWith("0x")) throw new Error("Invalid signature format (missing 0x).");
-
   const len = hex.length;
 
-  // 64-byte compact (0x + 128 hex)
   if (len === 130) {
     const sig65 = expandEip2098(hex);
     const { v, r, s } = decode65(sig65);
     return { signature: sig65, v, r, s };
   }
-
-  // 65-byte normal (0x + 130 hex)
   if (len === 132) {
     const { v, r, s } = decode65(hex);
     return { signature: hex, v, r, s };
   }
-
-  // 66-byte weird (0x + 132 hex)
   if (len === 134) {
     const sig65 = shrink66To65(hex);
     const { v, r, s } = decode65(sig65);
@@ -256,30 +277,85 @@ function normalizeSigTo65(sigLike) {
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
-  // preferred: viem walletClient.signMessage raw bytes32
+  // 0) wake wallet / ensure account is authorized (helps MetaMask Mobile)
+  try {
+    await withTimeout(
+      provider.request({ method: "eth_requestAccounts", params: [] }),
+      15_000,
+      "Wallet did not respond to eth_requestAccounts (timeout). Open your wallet app and try again."
+    );
+  } catch (e) {
+    // not fatal; continue — some wallets reject if already connected
+    lastErr = e;
+  }
+
+  // 1) preferred: viem walletClient.signMessage raw bytes32
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
-    const sig = await wc.signMessage({ account, message: { raw: msgHash } });
+    const sig = await withTimeout(
+      wc.signMessage({ account, message: { raw: msgHash } }),
+      45_000,
+      isProbablyMobile()
+        ? "Signature request timed out (mobile). Open the dapp inside MetaMask Browser or use WalletConnect, then try again."
+        : "Signature request timed out. Check your wallet popup and try again."
+    );
     return extractHexSigFromAny(sig);
   } catch (e) {
     lastErr = e;
   }
 
-  // fallback: personal_sign (param order varies)
+  // 2) fallback: personal_sign (param order varies across wallets)
   try {
-    const sig = await provider.request({ method: "personal_sign", params: [msgHash, account] });
+    const sig = await withTimeout(
+      provider.request({ method: "personal_sign", params: [msgHash, account] }),
+      45_000,
+      isProbablyMobile()
+        ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+        : "personal_sign timed out."
+    );
     return extractHexSigFromAny(sig);
   } catch (e1) {
     lastErr = e1;
     try {
-      const sig = await provider.request({ method: "personal_sign", params: [account, msgHash] });
+      const sig = await withTimeout(
+        provider.request({ method: "personal_sign", params: [account, msgHash] }),
+        45_000,
+        isProbablyMobile()
+          ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+          : "personal_sign timed out."
+      );
       return extractHexSigFromAny(sig);
     } catch (e2) {
       lastErr = e2;
     }
   }
 
-  throw new Error(lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.");
+  // 3) fallback: eth_sign (some wallets support when personal_sign is flaky)
+  try {
+    const sig = await withTimeout(
+      provider.request({ method: "eth_sign", params: [account, msgHash] }),
+      45_000,
+      isProbablyMobile()
+        ? "eth_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+        : "eth_sign timed out."
+    );
+    return extractHexSigFromAny(sig);
+  } catch (e3) {
+    lastErr = e3;
+  }
+
+  const base =
+    lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
+
+  // Add a strong hint for mobile deep-link problems
+  if (isProbablyMobile()) {
+    throw new Error(
+      `${base}\n\nMobile tip: If you opened the dapp in Chrome/Safari and it kicked you into MetaMask, the confirm can fail to appear.\n` +
+      `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
+    );
+  }
+
+  throw new Error(base);
 }
 
 export async function getNickname(walletAddress) {
@@ -306,12 +382,6 @@ export async function getNickname(walletAddress) {
 
 /**
  * Gasless nickname (relayer pays gas)
- * Accept ACTIVE EIP-1193 provider (MetaMask/Coinbase/WC).
- *
- * IMPORTANT:
- * We DO NOT locally verify the signature anymore.
- * The smart contract is the source of truth and will revert BadSig() if wrong.
- * This avoids wallet/provider edge-cases that were crashing the UI.
  */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const relayerUrl = resolveRelayerUrl();
@@ -335,8 +405,13 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     transport: http(rpc, { timeout: 20_000, retryCount: 1, retryDelay: 450 }),
   });
 
-  // 🔥 SOURCE OF TRUTH: chainId from RPC (matches relayer target)
-  const rpcChainId = await pc.getChainId().catch(() => Number(C.CHAIN_ID));
+  // ✅ SOURCE OF TRUTH: chainId from RPC (matches relayer target)
+  const rpcChainId = await withTimeout(
+    pc.getChainId().catch(() => Number(C.CHAIN_ID)),
+    12_000,
+    "RPC chainId lookup timed out. Check VITE_RPC_URL."
+  );
+
   const walletChainId = await getWalletChainId(provider);
 
   if (Number(walletChainId) !== Number(rpcChainId)) {
@@ -347,12 +422,16 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     );
   }
 
-  const nonce = await pc.readContract({
-    address: registry,
-    abi: NICK_ABI,
-    functionName: "nonces",
-    args: [user],
-  });
+  const nonce = await withTimeout(
+    pc.readContract({
+      address: registry,
+      abi: NICK_ABI,
+      functionName: "nonces",
+      args: [user],
+    }),
+    15_000,
+    "Nonce read timed out (RPC). Try again."
+  );
 
   const nowSec = Math.floor(Date.now() / 1000);
   const deadline = nowSec + 600;
@@ -363,7 +442,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     nonce,
     deadline,
     registry,
-    chainId: rpcChainId, // ✅ MUST match contract's block.chainid
+    chainId: rpcChainId,
   });
 
   dlog("env", { relayerUrl, registry, rpcChainId, walletChainId });
@@ -375,19 +454,23 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
   dlog("normalized", { sigLen: signature?.length, v, r, s });
 
-  const res = await fetch(`${relayerUrl}/relay/nickname`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      user,
-      nick: trimmed,
-      deadline,
-      v,
-      r,
-      s,
-      signature,
+  const res = await withTimeout(
+    fetch(`${relayerUrl}/relay/nickname`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        user,
+        nick: trimmed,
+        deadline,
+        v,
+        r,
+        s,
+        signature,
+      }),
     }),
-  });
+    20_000,
+    "Relayer request timed out. Check VITE_RELAYER_URL and Fly.io status."
+  );
 
   const txt = await res.text();
   let j = null;
@@ -423,7 +506,11 @@ export async function setNicknameDirect(nick, walletAddress, eip1193Provider) {
   const wc = createWalletClient({ chain, transport: custom(provider) });
 
   try {
-    await provider.request({ method: "eth_requestAccounts", params: [] });
+    await withTimeout(
+      provider.request({ method: "eth_requestAccounts", params: [] }),
+      15_000,
+      "Wallet did not respond to eth_requestAccounts (timeout)."
+    );
   } catch {}
 
   return await wc.writeContract({
