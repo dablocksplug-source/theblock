@@ -34,41 +34,21 @@ async function copyToClipboard(text) {
   }
 }
 
-/**
- * ✅ Mobile-ish detection
- * Goal: if this returns true, we ONLY show the bottom sheet (never dropdown).
- * This intentionally treats iPad/tablet + touch laptops as "mobile-ish" to avoid dropdown being "in the way".
- */
+// ✅ mobile-ish detection: small screens OR touch/coarse pointer (iPad/tablets included)
 function useIsMobileish() {
   const get = () => {
     if (typeof window === "undefined") return false;
-
-    const ua = navigator?.userAgent || "";
-    const isIOS =
-      /iPad|iPhone|iPod/.test(ua) ||
-      // iPadOS 13+ reports as Mac; detect touch-enabled Mac UA
-      (ua.includes("Mac") && navigator?.maxTouchPoints > 1);
-
     const mqSmall = window.matchMedia?.("(max-width: 640px)")?.matches ?? false;
     const mqCoarse = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
-    const touchCapable =
-      (navigator?.maxTouchPoints || 0) > 0 ||
-      "ontouchstart" in window ||
-      mqCoarse;
-
-    // Treat iOS/iPadOS as mobile-ish always (prevents dropdown on iPad Safari)
-    if (isIOS) return true;
-
-    // Otherwise: small screens OR touch-capable devices are mobile-ish
-    return mqSmall || touchCapable;
+    return mqSmall || mqCoarse;
   };
 
-  const [isMobileish, setIsMobileish] = useState(get);
+  const [isMobile, setIsMobile] = useState(get);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const update = () => setIsMobileish(get());
+    const update = () => setIsMobile(get());
 
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
@@ -83,7 +63,7 @@ function useIsMobileish() {
     };
   }, []);
 
-  return isMobileish;
+  return isMobile;
 }
 
 export default function WalletConnectButton({
@@ -114,7 +94,7 @@ export default function WalletConnectButton({
     hasOnchainNickname,
   } = useNicknameContext();
 
-  const isMobileish = useIsMobileish();
+  const isMobile = useIsMobileish();
 
   const [open, setOpen] = useState(false);
   const [localErr, setLocalErr] = useState("");
@@ -136,10 +116,7 @@ export default function WalletConnectButton({
     Number(chainId || 0) > 0 &&
     Number(chainId) !== Number(targetChainId);
 
-  const hasNickname = useMemo(
-    () => String(nickname || "").trim().length > 0,
-    [nickname]
-  );
+  const hasNickname = useMemo(() => String(nickname || "").trim().length > 0, [nickname]);
 
   const displayName = useMemo(() => {
     return getDisplayName({ walletAddress, nickname, useNickname });
@@ -157,46 +134,54 @@ export default function WalletConnectButton({
     return s.includes("walletconnect");
   });
 
-  // ✅ Close on outside click/tap only while open (prevents random closures)
+  // ✅ Close on outside click ONLY while open.
+  // Uses composedPath so portals count as inside.
   useEffect(() => {
     if (!open) return;
 
-    function onDocPointerDown(e) {
-      const t = e.target;
-      const inRoot = rootRef.current && rootRef.current.contains(t);
-      const inSheet = sheetRef.current && sheetRef.current.contains(t);
-      if (inRoot || inSheet) return;
-      setOpen(false);
-    }
-    function onEsc(e) {
-      if (e.key === "Escape") setOpen(false);
-    }
+    const onDocPointerDown = (e) => {
+      const path = e.composedPath?.() || [];
+      const rootEl = rootRef.current;
+      const sheetEl = sheetRef.current;
 
-    document.addEventListener("pointerdown", onDocPointerDown);
+      const insideRoot = rootEl && path.includes(rootEl);
+      const insideSheet = sheetEl && path.includes(sheetEl);
+
+      if (insideRoot || insideSheet) return;
+
+      if (debug) console.log("[WalletConnectButton] outside close");
+      setOpen(false);
+    };
+
+    const onEsc = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("pointerdown", onDocPointerDown, true); // capture
     document.addEventListener("keydown", onEsc);
+
     return () => {
-      document.removeEventListener("pointerdown", onDocPointerDown);
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
       document.removeEventListener("keydown", onEsc);
     };
-  }, [open]);
+  }, [open, debug]);
 
-  // ✅ If mobile-ish flips while menu is open, close it
+  // ✅ If mobile/desktop mode changes while open, close to avoid wrong UI
   useEffect(() => {
     if (!open) return;
     setOpen(false);
-  }, [isMobileish, open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
 
-  // ✅ Lock page scroll ONLY while mobile sheet is open
+  // ✅ Lock page scroll ONLY while mobile sheet open
   useEffect(() => {
-    if (!isMobileish) return;
-    if (!open) return;
-
-    const prevOverflow = document.body.style.overflow;
+    if (!isMobile || !open) return;
+    const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = prevOverflow;
+      document.body.style.overflow = prev;
     };
-  }, [open, isMobileish]);
+  }, [open, isMobile]);
 
   const buttonCls =
     size === "md"
@@ -245,23 +230,18 @@ export default function WalletConnectButton({
     }
   }, [setUseNickname, useNickname]);
 
-  // ✅ One-time nickname: show only when connected AND no nickname AND not locked on-chain
   const canSetNickname = isConnected && !hasNickname && !hasOnchainNickname;
 
   // =========================
   // MOBILE SHEET (portal)
   // =========================
   const mobileSheet =
-    open && isMobileish && typeof document !== "undefined"
+    open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setOpen(false);
-              }}
+              onPointerDown={() => setOpen(false)}
             />
 
             <div
@@ -412,7 +392,7 @@ export default function WalletConnectButton({
   // DESKTOP DROPDOWN
   // =========================
   const desktopDropdown =
-    open && !isMobileish ? (
+    open && !isMobile ? (
       <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
         {!isConnected ? (
           <>
@@ -541,20 +521,18 @@ export default function WalletConnectButton({
       <button
         type="button"
         className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
-        onClick={(e) => {
+        onPointerDown={(e) => {
+          // ✅ Prevent the “open then instantly close” pointerdown chain
           e.preventDefault();
           e.stopPropagation();
-          if (debug) console.log("[WalletConnectButton] toggle", { open: !open, isMobileish });
+          if (debug) console.log("[WalletConnectButton] toggle", { next: !open, isMobile });
           setOpen((v) => !v);
         }}
       >
         {chipLabel}
       </button>
 
-      {/* ✅ Mobile sheet ONLY on mobile-ish */}
       {mobileSheet}
-
-      {/* ✅ Dropdown ONLY on true desktop */}
       {desktopDropdown}
     </div>
   );
