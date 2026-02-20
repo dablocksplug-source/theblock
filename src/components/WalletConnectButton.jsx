@@ -240,12 +240,10 @@ export default function WalletConnectButton({
     open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
-            {/* Backdrop */}
+            {/* Backdrop: ALWAYS CLOSE (do NOT toggle) */}
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
-              onPointerDownCapture={(e) => {
-                // capture so it always wins
-                e.preventDefault();
+              onClick={(e) => {
                 e.stopPropagation();
                 setOpen(false);
               }}
@@ -255,7 +253,7 @@ export default function WalletConnectButton({
             <div
               ref={sheetRef}
               className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
-              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-4 py-3">
                 <div className="text-sm font-semibold text-slate-100">
@@ -530,8 +528,7 @@ export default function WalletConnectButton({
         type="button"
         className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
         onClick={(e) => {
-          // ✅ Click avoids the pointerdown-capture race that causes “flash”
-          e.preventDefault();
+          // ✅ Click is most compatible with MetaMask in-app browser
           e.stopPropagation();
           if (debug) console.log("[WalletConnectButton] toggle(click)", { next: !open, isMobile });
           setOpen((v) => !v);
