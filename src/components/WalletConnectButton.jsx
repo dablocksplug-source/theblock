@@ -1,4 +1,3 @@
-// src/components/WalletConnectButton.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useWallet } from "../context/WalletContext";
@@ -70,13 +69,12 @@ export default function WalletConnectButton({
     availableConnectors,
   } = useWallet();
 
-  // ✅ Nickname controls live here now too (one-and-done)
+  // ✅ Nickname controls live here now too
   const {
     nickname,
     useNickname,
     setUseNickname,
     askForNickname,
-    hasOnchainNickname,
   } = useNicknameContext();
 
   const isMobile = useIsMobile(640);
@@ -106,9 +104,6 @@ export default function WalletConnectButton({
   const hasNickname = useMemo(() => {
     return String(nickname || "").trim().length > 0;
   }, [nickname]);
-
-  // ✅ show Set Nickname only if chain does NOT already have one
-  const canSetNickname = isConnected && !hasOnchainNickname;
 
   const chipLabel = useMemo(() => {
     if (!isConnected) return label;
@@ -175,7 +170,7 @@ export default function WalletConnectButton({
     try {
       setLocalErr("");
       setOpen(false);
-      askForNickname?.(); // gated in context (won't open if chain already has one)
+      askForNickname?.();
     } catch (e) {
       bubbleErr(e?.message || "Could not open nickname modal.");
     }
@@ -254,6 +249,7 @@ export default function WalletConnectButton({
                   </>
                 ) : (
                   <>
+                    {/* Small header line */}
                     <div className="px-4 pt-4 pb-2 text-sm text-slate-300">
                       Connected as{" "}
                       <span className="font-semibold text-slate-100">
@@ -261,7 +257,7 @@ export default function WalletConnectButton({
                       </span>
                     </div>
 
-                    {canSetNickname ? (
+                    {!hasNickname ? (
                       <button
                         type="button"
                         className="w-full px-4 py-4 text-left text-base text-emerald-200 hover:bg-slate-900"
@@ -407,7 +403,7 @@ export default function WalletConnectButton({
                 </span>
               </div>
 
-              {canSetNickname ? (
+              {!hasNickname ? (
                 <button
                   type="button"
                   className="w-full px-4 py-2 text-left text-xs text-emerald-200 hover:bg-slate-900"
