@@ -36,8 +36,42 @@ function errToString(e) {
   }
 }
 
+// normalize chainId inputs like: 84532, "84532", "0x14a84"
+function toChainId(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return 0;
+  if (s.startsWith("0x")) {
+    const n = parseInt(s, 16);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function getProviderChainId(provider) {
+  try {
+    if (provider && typeof provider.request === "function") {
+      const hex = await provider.request({ method: "eth_chainId" });
+      return toChainId(hex);
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
 export function NicknameProvider({ children }) {
-  const { walletAddress, provider, isConnected } = useWallet();
+  const {
+    walletAddress,
+    provider,
+    isConnected,
+    chainId,        // from wallet context (may be string/number depending on connector)
+    ensureChain,    // should switch networks if supported
+  } = useWallet();
+
+  const TARGET_CHAIN_ID = toChainId(import.meta.env.VITE_CHAIN_ID || 84532);
   const addrKey = useMemo(() => normalizeAddr(walletAddress), [walletAddress]);
 
   const [useNickname, setUseNickname] = useState(true);
@@ -133,14 +167,12 @@ export function NicknameProvider({ children }) {
             blockswapAdapter.setLabel({ walletAddress, label: trimmed });
           } catch {}
 
-          // If modal was open while we discovered on-chain nick, close it.
           setModalOpen(false);
           setLoading(false);
         } else {
           setHasOnchainNickname(false);
         }
       } catch (err) {
-        // Treat read failures as "unknown/no nickname" to avoid blocking users.
         if (!cancelled) setHasOnchainNickname(false);
         console.debug("No nickname on chain for this wallet:", errToString(err));
       }
@@ -165,6 +197,50 @@ export function NicknameProvider({ children }) {
     }
   };
 
+  async function ensureRightNetworkOrThrow() {
+    const want = toChainId(TARGET_CHAIN_ID);
+    if (!want) return;
+
+    // 1) check context chainId
+    const ctxChain = toChainId(chainId);
+
+    // 2) also check provider eth_chainId (mobile weirdness)
+    const provChain = await getProviderChainId(provider);
+
+    const current = provChain || ctxChain;
+
+    if (current && current === want) return;
+
+    // If we can switch, try it
+    if (typeof ensureChain === "function") {
+      try {
+        await ensureChain(want);
+      } catch (e) {
+        throw new Error(
+          `Wrong network in wallet.\n` +
+            `Expected chainId=${want}\n` +
+            `Wallet chainId=${current || "unknown"}\n` +
+            `Switch network in your wallet and try again.\n` +
+            `Details: ${errToString(e)}`
+        );
+      }
+
+      // re-check after switching
+      const afterProv = await getProviderChainId(provider);
+      const afterCtx = toChainId(chainId);
+      const after = afterProv || afterCtx;
+
+      if (after && after === want) return;
+    }
+
+    throw new Error(
+      `Wrong network in wallet.\n` +
+        `Expected chainId=${want}\n` +
+        `Wallet chainId=${current || "unknown"}\n` +
+        `Fix: switch your wallet network to match BlockSwap (target chainId=${want}).`
+    );
+  }
+
   const saveNickname = async (name) => {
     const trimmed = (name || "").trim();
 
@@ -179,6 +255,9 @@ export function NicknameProvider({ children }) {
 
     setLoading(true);
     try {
+      // ✅ Enforce chain BEFORE relay attempt (mobile MetaMask / deep-link edge cases)
+      await ensureRightNetworkOrThrow();
+
       try {
         await setNicknameRelayed(trimmed, walletAddress, provider);
       } catch (e) {
@@ -186,10 +265,14 @@ export function NicknameProvider({ children }) {
         if (!allowDirect) {
           throw new Error(
             `Gasless nickname failed: ${errToString(e)}\n` +
+              `Wallet chain must be ${TARGET_CHAIN_ID}.\n` +
               `Fix: ensure relayer exposes POST /relay/nickname and VITE_RELAYER_URL is set.\n` +
               `Dev escape hatch: set VITE_ALLOW_DIRECT_NICKNAME=true (or 1).`
           );
         }
+
+        // Also enforce chain before direct
+        await ensureRightNetworkOrThrow();
         await setNicknameDirect(trimmed, walletAddress, provider);
       }
 
@@ -214,7 +297,7 @@ export function NicknameProvider({ children }) {
 
   const askForNickname = () => {
     if (!walletAddress || !isConnected) return;
-    if (hasOnchainNickname) return; // ✅ block forever once set
+    if (hasOnchainNickname) return;
     setModalOpen(true);
   };
 
@@ -224,7 +307,6 @@ export function NicknameProvider({ children }) {
     setNickname,
     setUseNickname,
 
-    // ✅ WalletConnectButton uses this to hide “Set Nickname”
     hasOnchainNickname,
 
     modalOpen,
