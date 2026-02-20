@@ -970,10 +970,10 @@ export default function BlockSwap() {
   }, [myRewardsEntry]);
 
   return (
-    // ✅ Added pt-20 so content clears the FIXED global Navbar
+    // content offset for global header
     <div className="min-h-screen bg-slate-950 text-slate-50 pt-20">
       <main className="mx-auto max-w-6xl px-4 pb-16 pt-6">
-        {/* Top controls (connect lives in global Navbar now) */}
+        {/* Top controls (connect lives in global header now) */}
         <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">

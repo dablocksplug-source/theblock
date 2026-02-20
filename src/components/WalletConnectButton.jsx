@@ -157,7 +157,8 @@ export default function WalletConnectButton({
       if (e.key === "Escape") setOpen(false);
     };
 
-    document.addEventListener("pointerdown", onDocPointerDown, true); // capture
+    // capture is intentional: we want to close even if other UI stops propagation later
+    document.addEventListener("pointerdown", onDocPointerDown, true);
     document.addEventListener("keydown", onEsc);
 
     return () => {
@@ -239,11 +240,18 @@ export default function WalletConnectButton({
     open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
+            {/* Backdrop */}
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
-              onPointerDown={() => setOpen(false)}
+              onPointerDownCapture={(e) => {
+                // capture so it always wins
+                e.preventDefault();
+                e.stopPropagation();
+                setOpen(false);
+              }}
             />
 
+            {/* Sheet */}
             <div
               ref={sheetRef}
               className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
@@ -521,11 +529,11 @@ export default function WalletConnectButton({
       <button
         type="button"
         className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
-        onPointerDown={(e) => {
-          // ✅ Prevent the “open then instantly close” pointerdown chain
+        onClick={(e) => {
+          // ✅ Click avoids the pointerdown-capture race that causes “flash”
           e.preventDefault();
           e.stopPropagation();
-          if (debug) console.log("[WalletConnectButton] toggle", { next: !open, isMobile });
+          if (debug) console.log("[WalletConnectButton] toggle(click)", { next: !open, isMobile });
           setOpen((v) => !v);
         }}
       >
