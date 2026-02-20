@@ -3,12 +3,7 @@ import React, { useMemo, useState, useEffect } from "react";
 import { Link, useLocation, Outlet, useNavigate } from "react-router-dom";
 
 import { useWallet } from "../context/WalletContext";
-import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
-
-import WalletPanel from "../components/WalletPanel";
 import NicknameModal from "../components/NicknameModal";
-
-// ✅ Dropdown connect (MetaMask / Coinbase / WalletConnect)
 import WalletConnectButton from "../components/WalletConnectButton";
 
 // ✅ Simple toast helper (no libs)
@@ -23,24 +18,12 @@ function useToast(ms = 1600) {
 }
 
 export default function LayoutWrapper({ children }) {
-  const { walletAddress, disconnectWallet, isConnected, chainId } = useWallet(); // ✅ removed connectWallet
-  const { nickname, useNickname } = useNicknameContext();
+  const { isConnected, chainId } = useWallet();
   const location = useLocation();
   const navigate = useNavigate();
   const { toast, setToast } = useToast(1600);
 
   const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 84532);
-
-  const displayName = getDisplayName({ walletAddress, nickname, useNickname });
-
-  const shortAddress =
-    walletAddress && walletAddress.length > 10
-      ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
-      : walletAddress || "Not connected";
-
-  // Label when connected is handled by WalletConnectButton itself;
-  // we keep your disconnected label here.
-  const walletButtonLabel = "Connect Wallet";
 
   const wrongChain =
     isConnected &&
@@ -49,7 +32,6 @@ export default function LayoutWrapper({ children }) {
     Number(chainId) !== Number(TARGET_CHAIN_ID);
 
   // ✅ Single source of truth for routes + "coming soon" gating.
-  // Flip `enabled: true` when a district is ready.
   const navItems = useMemo(
     () => [
       { name: "BlockSwap", path: "/blockswap", enabled: true },
@@ -61,16 +43,12 @@ export default function LayoutWrapper({ children }) {
       { name: "BlockPay", path: "/blockpay", enabled: false, soon: "BlockPay is coming soon." },
       { name: "BlockProof", path: "/blockproof", enabled: false, soon: "BlockProof is coming soon." },
 
-      // Info routes
       { name: "Lore", path: "/lore", enabled: true },
-
-      // ✅ IMPORTANT: Align with main.jsx (we use /alley, NOT /thealley)
       { name: "TheAlley", path: "/alley", enabled: false, soon: "TheAlley is coming soon." },
     ],
     []
   );
 
-  // Normalize for active state (strip trailing slashes)
   const curPath = (location.pathname || "/").replace(/\/+$/, "") || "/";
 
   function isActive(path) {
@@ -82,11 +60,9 @@ export default function LayoutWrapper({ children }) {
   function onNavClick(e, item) {
     if (item.enabled) return;
 
-    // block navigation for disabled items
     e.preventDefault();
     setToast(item.soon || "This district is coming soon.");
 
-    // If user is NOT already on BlockSwap, gently send them there after a moment
     if (curPath !== "/blockswap") {
       setTimeout(() => {
         try {
@@ -98,7 +74,7 @@ export default function LayoutWrapper({ children }) {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100">
-      {/* ====== TOP BAR ====== */}
+      {/* ====== TOP BAR (SINGLE SOURCE OF TRUTH) ====== */}
       <header className="w-full py-3 px-6 flex justify-between items-center border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50">
         <Link to="/" className="text-cyan-400 text-lg font-semibold">
           The Block
@@ -106,7 +82,6 @@ export default function LayoutWrapper({ children }) {
 
         <div className="text-xs text-slate-500 hidden sm:block">Building slow. Shipping steady.</div>
 
-        {/* ✅ Replaces auto-MetaMask connectWallet() with a dropdown picker */}
         <div className="flex items-center gap-2">
           {wrongChain ? (
             <div className="hidden sm:block text-[11px] text-rose-200/90 border border-rose-500/20 bg-rose-500/10 px-2 py-1 rounded-lg">
@@ -114,29 +89,15 @@ export default function LayoutWrapper({ children }) {
             </div>
           ) : null}
 
+          {/* ✅ ONLY wallet UI */}
           <WalletConnectButton
             targetChainId={TARGET_CHAIN_ID}
             size="md"
-            label={walletButtonLabel}
+            label="Connect Wallet"
             onToast={(m) => setToast(String(m || ""))}
             onError={(m) => setToast(String(m || ""))}
           />
-
-          {/* Optional quick disconnect (keeps your old behavior available) */}
-          {isConnected ? (
-            <button
-              onClick={() => disconnectWallet?.()}
-              className="text-sm px-3 py-1.5 rounded-xl border border-rose-400/30 text-rose-300 hover:border-rose-300/50"
-              type="button"
-              title={`Disconnect ${displayName} (${shortAddress})`}
-            >
-              Disconnect
-            </button>
-          ) : null}
         </div>
-
-        {/* HUD panel with avatar + nickname + disconnect */}
-        <WalletPanel />
       </header>
 
       {/* ✅ Lightweight toast */}
@@ -194,7 +155,7 @@ export default function LayoutWrapper({ children }) {
         © {new Date().getFullYear()} The Block.
       </footer>
 
-      {/* Nickname modal is self-managed */}
+      {/* ✅ Nickname modal is global */}
       <NicknameModal />
     </div>
   );

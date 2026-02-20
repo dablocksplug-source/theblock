@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// src/components/WalletConnectButton.jsx
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useWallet } from "../context/WalletContext";
 import { useNicknameContext, getDisplayName } from "../context/NicknameContext";
@@ -33,20 +34,56 @@ async function copyToClipboard(text) {
   }
 }
 
-function useIsMobile(breakpointPx = 640) {
-  const [isMobile, setIsMobile] = useState(() => {
+/**
+ * ✅ Mobile-ish detection
+ * Goal: if this returns true, we ONLY show the bottom sheet (never dropdown).
+ * This intentionally treats iPad/tablet + touch laptops as "mobile-ish" to avoid dropdown being "in the way".
+ */
+function useIsMobileish() {
+  const get = () => {
     if (typeof window === "undefined") return false;
-    return window.innerWidth < breakpointPx;
-  });
+
+    const ua = navigator?.userAgent || "";
+    const isIOS =
+      /iPad|iPhone|iPod/.test(ua) ||
+      // iPadOS 13+ reports as Mac; detect touch-enabled Mac UA
+      (ua.includes("Mac") && navigator?.maxTouchPoints > 1);
+
+    const mqSmall = window.matchMedia?.("(max-width: 640px)")?.matches ?? false;
+    const mqCoarse = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+    const touchCapable =
+      (navigator?.maxTouchPoints || 0) > 0 ||
+      "ontouchstart" in window ||
+      mqCoarse;
+
+    // Treat iOS/iPadOS as mobile-ish always (prevents dropdown on iPad Safari)
+    if (isIOS) return true;
+
+    // Otherwise: small screens OR touch-capable devices are mobile-ish
+    return mqSmall || touchCapable;
+  };
+
+  const [isMobileish, setIsMobileish] = useState(get);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const onResize = () => setIsMobile(window.innerWidth < breakpointPx);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [breakpointPx]);
 
-  return isMobile;
+    const update = () => setIsMobileish(get());
+
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+
+    const vv = window.visualViewport;
+    if (vv) vv.addEventListener("resize", update);
+
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      if (vv) vv.removeEventListener("resize", update);
+    };
+  }, []);
+
+  return isMobileish;
 }
 
 export default function WalletConnectButton({
@@ -69,19 +106,21 @@ export default function WalletConnectButton({
     availableConnectors,
   } = useWallet();
 
-  // ✅ Nickname controls live here now too
   const {
     nickname,
     useNickname,
     setUseNickname,
     askForNickname,
+    hasOnchainNickname,
   } = useNicknameContext();
 
-  const isMobile = useIsMobile(640);
+  const isMobileish = useIsMobileish();
 
   const [open, setOpen] = useState(false);
   const [localErr, setLocalErr] = useState("");
+
   const rootRef = useRef(null);
+  const sheetRef = useRef(null);
 
   const toast = (msg) => typeof onToast === "function" && onToast(msg);
 
@@ -97,18 +136,18 @@ export default function WalletConnectButton({
     Number(chainId || 0) > 0 &&
     Number(chainId) !== Number(targetChainId);
 
+  const hasNickname = useMemo(
+    () => String(nickname || "").trim().length > 0,
+    [nickname]
+  );
+
   const displayName = useMemo(() => {
     return getDisplayName({ walletAddress, nickname, useNickname });
   }, [walletAddress, nickname, useNickname]);
 
-  const hasNickname = useMemo(() => {
-    return String(nickname || "").trim().length > 0;
-  }, [nickname]);
-
   const chipLabel = useMemo(() => {
     if (!isConnected) return label;
     const addr = walletAddress ? shortAddr(walletAddress) : "—";
-    // show nickname if enabled + available, otherwise wallet short
     const shown = useNickname && hasNickname ? String(nickname).trim() : addr;
     return `Wallet (${shown})`;
   }, [isConnected, walletAddress, label, useNickname, hasNickname, nickname]);
@@ -118,25 +157,46 @@ export default function WalletConnectButton({
     return s.includes("walletconnect");
   });
 
-  // Desktop-only outside click + ESC
+  // ✅ Close on outside click/tap only while open (prevents random closures)
   useEffect(() => {
-    if (isMobile) return;
+    if (!open) return;
 
-    function onDocDown(e) {
-      if (!rootRef.current) return;
-      if (!rootRef.current.contains(e.target)) setOpen(false);
+    function onDocPointerDown(e) {
+      const t = e.target;
+      const inRoot = rootRef.current && rootRef.current.contains(t);
+      const inSheet = sheetRef.current && sheetRef.current.contains(t);
+      if (inRoot || inSheet) return;
+      setOpen(false);
     }
     function onEsc(e) {
       if (e.key === "Escape") setOpen(false);
     }
 
-    document.addEventListener("mousedown", onDocDown);
+    document.addEventListener("pointerdown", onDocPointerDown);
     document.addEventListener("keydown", onEsc);
     return () => {
-      document.removeEventListener("mousedown", onDocDown);
+      document.removeEventListener("pointerdown", onDocPointerDown);
       document.removeEventListener("keydown", onEsc);
     };
-  }, [isMobile]);
+  }, [open]);
+
+  // ✅ If mobile-ish flips while menu is open, close it
+  useEffect(() => {
+    if (!open) return;
+    setOpen(false);
+  }, [isMobileish, open]);
+
+  // ✅ Lock page scroll ONLY while mobile sheet is open
+  useEffect(() => {
+    if (!isMobileish) return;
+    if (!open) return;
+
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open, isMobileish]);
 
   const buttonCls =
     size === "md"
@@ -158,7 +218,6 @@ export default function WalletConnectButton({
     try {
       setLocalErr("");
       setOpen(false);
-      if (debug) console.log("[WalletConnectButton] connect", failMsg);
       await fn?.();
       toast("Connected ✅");
     } catch (err) {
@@ -166,7 +225,7 @@ export default function WalletConnectButton({
     }
   }
 
-  const doSetNickname = () => {
+  const doSetNickname = useCallback(() => {
     try {
       setLocalErr("");
       setOpen(false);
@@ -174,9 +233,9 @@ export default function WalletConnectButton({
     } catch (e) {
       bubbleErr(e?.message || "Could not open nickname modal.");
     }
-  };
+  }, [askForNickname]);
 
-  const doToggleNick = () => {
+  const doToggleNick = useCallback(() => {
     try {
       setLocalErr("");
       setUseNickname?.(!useNickname);
@@ -184,18 +243,32 @@ export default function WalletConnectButton({
     } catch (e) {
       bubbleErr(e?.message || "Toggle failed.");
     }
-  };
+  }, [setUseNickname, useNickname]);
 
+  // ✅ One-time nickname: show only when connected AND no nickname AND not locked on-chain
+  const canSetNickname = isConnected && !hasNickname && !hasOnchainNickname;
+
+  // =========================
+  // MOBILE SHEET (portal)
+  // =========================
   const mobileSheet =
-    open && isMobile && typeof document !== "undefined"
+    open && isMobileish && typeof document !== "undefined"
       ? createPortal(
           <>
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
-              onClick={() => setOpen(false)}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setOpen(false);
+              }}
             />
 
-            <div className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl">
+            <div
+              ref={sheetRef}
+              className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
+              onPointerDown={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between px-4 py-3">
                 <div className="text-sm font-semibold text-slate-100">
                   {isConnected ? "Wallet" : "Connect"}
@@ -210,8 +283,8 @@ export default function WalletConnectButton({
               </div>
 
               <div
-                className="h-[70vh] overflow-y-auto border-t border-slate-800/70"
-                style={{ WebkitOverflowScrolling: "touch" }}
+                className="max-h-[70vh] overflow-y-auto border-t border-slate-800/70"
+                style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
               >
                 {!isConnected ? (
                   <>
@@ -249,7 +322,6 @@ export default function WalletConnectButton({
                   </>
                 ) : (
                   <>
-                    {/* Small header line */}
                     <div className="px-4 pt-4 pb-2 text-sm text-slate-300">
                       Connected as{" "}
                       <span className="font-semibold text-slate-100">
@@ -257,7 +329,7 @@ export default function WalletConnectButton({
                       </span>
                     </div>
 
-                    {!hasNickname ? (
+                    {canSetNickname ? (
                       <button
                         type="button"
                         className="w-full px-4 py-4 text-left text-base text-emerald-200 hover:bg-slate-900"
@@ -305,7 +377,7 @@ export default function WalletConnectButton({
                           }
                         }}
                       >
-                        Switch to chain {targetChainId}
+                        Switch network
                       </button>
                     ) : null}
 
@@ -336,6 +408,128 @@ export default function WalletConnectButton({
         )
       : null;
 
+  // =========================
+  // DESKTOP DROPDOWN
+  // =========================
+  const desktopDropdown =
+    open && !isMobileish ? (
+      <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
+        {!isConnected ? (
+          <>
+            <button
+              type="button"
+              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+              onClick={() => safeConnect(connectMetaMask, "MetaMask connect failed.")}
+            >
+              MetaMask
+            </button>
+            <button
+              type="button"
+              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+              onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
+            >
+              Coinbase Wallet
+            </button>
+            <button
+              type="button"
+              className={
+                "w-full px-4 py-2 text-left text-xs hover:bg-slate-900 " +
+                (canWC ? "text-slate-200" : "text-slate-500")
+              }
+              disabled={!canWC}
+              onClick={() => safeConnect(connectWalletConnect, "WalletConnect failed.")}
+            >
+              WalletConnect {canWC ? "" : "(not configured)"}
+            </button>
+
+            <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
+              Pick a wallet — no auto-connect.
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="px-4 py-2 text-[11px] text-slate-400">
+              Connected as{" "}
+              <span className="text-slate-200 font-semibold">
+                {displayName || shortAddr(walletAddress)}
+              </span>
+            </div>
+
+            {canSetNickname ? (
+              <button
+                type="button"
+                className="w-full px-4 py-2 text-left text-xs text-emerald-200 hover:bg-slate-900"
+                onClick={doSetNickname}
+              >
+                Set Nickname
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+              onClick={doToggleNick}
+            >
+              {useNickname ? "Show Address Instead" : "Show Nickname Instead"}
+            </button>
+
+            <button
+              type="button"
+              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+              onClick={async () => {
+                const ok = await copyToClipboard(String(walletAddress || ""));
+                if (ok) toast("Copied ✅");
+                setOpen(false);
+              }}
+            >
+              Copy address
+            </button>
+
+            {wrongChain && ensureChain ? (
+              <button
+                type="button"
+                className="w-full px-4 py-2 text-left text-xs text-rose-200 hover:bg-slate-900"
+                onClick={async () => {
+                  try {
+                    setLocalErr("");
+                    await ensureChain(Number(targetChainId));
+                    toast("Network switched ✅");
+                    setOpen(false);
+                  } catch (err) {
+                    bubbleErr(
+                      err?.message ||
+                        `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
+                    );
+                  }
+                }}
+              >
+                Switch network
+              </button>
+            ) : null}
+
+            <div className="border-t border-slate-800/80" />
+
+            <button
+              type="button"
+              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
+              onClick={() => {
+                try {
+                  setLocalErr("");
+                  disconnectWallet?.();
+                  toast("Disconnected");
+                  setOpen(false);
+                } catch (err) {
+                  bubbleErr(err?.message || "Disconnect failed.");
+                }
+              }}
+            >
+              Disconnect
+            </button>
+          </>
+        )}
+      </div>
+    ) : null;
+
   return (
     <div ref={rootRef} className="relative">
       {localErr ? (
@@ -350,132 +544,18 @@ export default function WalletConnectButton({
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (debug) console.log("[WalletConnectButton] toggle", { open: !open, isMobile });
+          if (debug) console.log("[WalletConnectButton] toggle", { open: !open, isMobileish });
           setOpen((v) => !v);
         }}
       >
         {chipLabel}
       </button>
 
-      {/* MOBILE PORTAL SHEET */}
+      {/* ✅ Mobile sheet ONLY on mobile-ish */}
       {mobileSheet}
 
-      {/* DESKTOP DROPDOWN */}
-      {open && !isMobile ? (
-        <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
-          {!isConnected ? (
-            <>
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => safeConnect(connectMetaMask, "MetaMask connect failed.")}
-              >
-                MetaMask
-              </button>
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
-              >
-                Coinbase Wallet
-              </button>
-              <button
-                type="button"
-                className={
-                  "w-full px-4 py-2 text-left text-xs hover:bg-slate-900 " +
-                  (canWC ? "text-slate-200" : "text-slate-500")
-                }
-                disabled={!canWC}
-                onClick={() => safeConnect(connectWalletConnect, "WalletConnect failed.")}
-              >
-                WalletConnect {canWC ? "" : "(not configured)"}
-              </button>
-              <div className="border-t border-slate-800/80 px-4 py-2 text-[11px] text-slate-400">
-                Pick a wallet — no auto-connect.
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="px-4 py-2 text-[11px] text-slate-400">
-                Connected as{" "}
-                <span className="text-slate-200 font-semibold">
-                  {displayName || shortAddr(walletAddress)}
-                </span>
-              </div>
-
-              {!hasNickname ? (
-                <button
-                  type="button"
-                  className="w-full px-4 py-2 text-left text-xs text-emerald-200 hover:bg-slate-900"
-                  onClick={doSetNickname}
-                >
-                  Set Nickname
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={doToggleNick}
-              >
-                {useNickname ? "Show Address Instead" : "Show Nickname Instead"}
-              </button>
-
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={async () => {
-                  const ok = await copyToClipboard(String(walletAddress || ""));
-                  if (ok) toast("Copied ✅");
-                  setOpen(false);
-                }}
-              >
-                Copy address
-              </button>
-
-              {wrongChain && ensureChain ? (
-                <button
-                  type="button"
-                  className="w-full px-4 py-2 text-left text-xs text-rose-200 hover:bg-slate-900"
-                  onClick={async () => {
-                    try {
-                      setLocalErr("");
-                      await ensureChain(Number(targetChainId));
-                      toast("Network switched ✅");
-                      setOpen(false);
-                    } catch (err) {
-                      bubbleErr(
-                        err?.message ||
-                          `Switch failed. Open your wallet and switch to chain ${targetChainId}.`
-                      );
-                    }
-                  }}
-                >
-                  Switch to chain {targetChainId}
-                </button>
-              ) : null}
-
-              <div className="border-t border-slate-800/80" />
-              <button
-                type="button"
-                className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-                onClick={() => {
-                  try {
-                    setLocalErr("");
-                    disconnectWallet?.();
-                    toast("Disconnected");
-                    setOpen(false);
-                  } catch (err) {
-                    bubbleErr(err?.message || "Disconnect failed.");
-                  }
-                }}
-              >
-                Disconnect
-              </button>
-            </>
-          )}
-        </div>
-      ) : null}
+      {/* ✅ Dropdown ONLY on true desktop */}
+      {desktopDropdown}
     </div>
   );
 }
