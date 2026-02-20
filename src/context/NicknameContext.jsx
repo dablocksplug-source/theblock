@@ -44,6 +44,9 @@ export function NicknameProvider({ children }) {
   const [nicknamesByAddr, setNicknamesByAddr] = useState({});
   const [nickname, setNicknameState] = useState("");
 
+  // ✅ track if chain already has a nickname for this wallet (one-and-done)
+  const [hasOnchainNickname, setHasOnchainNickname] = useState(false);
+
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -73,7 +76,10 @@ export function NicknameProvider({ children }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ useNickname, nicknames: nicknamesByAddr }));
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ useNickname, nicknames: nicknamesByAddr })
+      );
     } catch (err) {
       console.error("Failed to save nickname settings:", err);
     }
@@ -83,6 +89,7 @@ export function NicknameProvider({ children }) {
   useEffect(() => {
     setModalOpen(false);
     setLoading(false);
+    setHasOnchainNickname(false); // ✅ reset until we read chain again
 
     if (!addrKey) {
       setNicknameState("");
@@ -107,7 +114,16 @@ export function NicknameProvider({ children }) {
       try {
         const chainName = await getNickname(walletAddress);
         const trimmed = (chainName || "").trim();
-        if (cancelled || trimmed.length === 0) return;
+
+        if (cancelled) return;
+
+        // ✅ explicitly mark whether chain has it
+        if (!trimmed) {
+          setHasOnchainNickname(false);
+          return;
+        }
+
+        setHasOnchainNickname(true);
 
         const key = normalizeAddr(walletAddress);
         setNicknamesByAddr((prev) => {
@@ -123,6 +139,8 @@ export function NicknameProvider({ children }) {
           blockswapAdapter.setLabel({ walletAddress, label: trimmed });
         } catch {}
       } catch (err) {
+        // treat failures as "no nickname" so user can try
+        if (!cancelled) setHasOnchainNickname(false);
         console.debug("No nickname on chain for this wallet:", errToString(err));
       }
     })();
@@ -153,6 +171,11 @@ export function NicknameProvider({ children }) {
     if (trimmed.length < 3) throw new Error("Name too short.");
     if (trimmed.length > 24) throw new Error("Name too long (max 24).");
 
+    // ✅ hard stop if chain already has a nickname (one-and-done)
+    if (hasOnchainNickname) {
+      throw new Error("This wallet already has a permanent nickname set.");
+    }
+
     setLoading(true);
     try {
       try {
@@ -173,6 +196,7 @@ export function NicknameProvider({ children }) {
       setNicknamesByAddr((prev) => ({ ...(prev || {}), [key]: trimmed }));
       setNicknameState(trimmed);
       setUseNickname(true);
+      setHasOnchainNickname(true); // ✅ lock it in
 
       try {
         blockswapAdapter.setLabel({ walletAddress, label: trimmed });
@@ -187,6 +211,8 @@ export function NicknameProvider({ children }) {
 
   const askForNickname = () => {
     if (!walletAddress || !isConnected) return;
+    // ✅ one-and-done: only open modal if chain does NOT already have nickname
+    if (hasOnchainNickname) return;
     setModalOpen(true);
   };
 
@@ -195,6 +221,10 @@ export function NicknameProvider({ children }) {
     useNickname,
     setNickname,
     setUseNickname,
+
+    // ✅ expose chain lock state so UI can show/hide Set Nickname
+    hasOnchainNickname,
+
     modalOpen,
     setModalOpen,
     loading,
