@@ -294,10 +294,31 @@ export default function BlockSwap() {
     }
   }, []);
 
+  // ✅ PRECISE: rewards address resolution priority:
+  // 1) C.REWARDS_ADDRESS (manual override)
+  // 2) deployments file via resolved.deployments.contracts.BlockRewardsMerkle
+  // 3) empty string
   const rewardsAddress = useMemo(() => {
-    const v = String(C.REWARDS_ADDRESS || "").trim();
-    return v && v !== "0x0000000000000000000000000000000000000000" ? v : "";
-  }, []);
+    const isAddr = (v) => /^0x[a-fA-F0-9]{40}$/.test(String(v || "").trim());
+    const notZero = (v) =>
+      String(v || "").trim().toLowerCase() !== "0x0000000000000000000000000000000000000000";
+
+    // 1) config override
+    const fromCfg = String(C.REWARDS_ADDRESS || "").trim();
+    if (fromCfg && isAddr(fromCfg) && notZero(fromCfg)) return fromCfg;
+
+    // 2) deployments (adapter-resolved)
+    const fromDeploy =
+      resolved?.deployments?.contracts?.BlockRewardsMerkle ||
+      resolved?.deployments?.BlockRewardsMerkle ||
+      resolved?.deployments?.contracts?.RewardsMerkle ||
+      "";
+
+    const s = String(fromDeploy || "").trim();
+    if (s && isAddr(s) && notZero(s)) return s;
+
+    return "";
+  }, [resolved]);
 
   const rewardsRoundId = useMemo(() => Number(C.REWARDS_ROUND_ID || 1), []);
   const rewardsProofsUrl = useMemo(
@@ -673,12 +694,12 @@ export default function BlockSwap() {
 
     if (!rewardsAddress) {
       setRewardsErr(
-        "Rewards contract address missing. Set VITE_REWARDS_MERKLE_ADDRESS (or VITE_REWARDS_ADDRESS)."
+        "Rewards contract address missing. Add BlockRewardsMerkle to deployments OR set C.REWARDS_ADDRESS."
       );
       return;
     }
     if (!publicClient) {
-      setRewardsErr("RPC not configured. Set VITE_RPC_URL (or C.RPC_URL).");
+      setRewardsErr("RPC not configured. Set C.RPC_URL (or VITE_RPC_URL used by config).");
       return;
     }
 
@@ -741,7 +762,7 @@ export default function BlockSwap() {
 
     try {
       if (!walletAddress) throw new Error("Connect wallet first.");
-      if (!rewardsAddress) throw new Error("Rewards address missing in config/env.");
+      if (!rewardsAddress) throw new Error("Rewards address missing in config/deployments.");
       if (!publicClient) throw new Error("RPC missing.");
       if (!myRewardsEntry) throw new Error("This wallet is not in the proofs file.");
 
@@ -1514,7 +1535,8 @@ export default function BlockSwap() {
           </div>
 
           <div className="mt-3 grid gap-2 md:grid-cols-3">
-            <ContractRow label="Rewards (Merkle)" value={rewardsAddress || "—"} />
+            {/* ✅ PRECISE: pass real value; ContractRow handles empty -> "—" and disables copy */}
+            <ContractRow label="Rewards (Merkle)" value={rewardsAddress} />
             <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
               <div className="text-[10px] uppercase text-slate-500">Proofs URL</div>
               <div className="truncate font-mono text-xs text-slate-200">{rewardsProofsUrl}</div>

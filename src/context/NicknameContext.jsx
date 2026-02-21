@@ -1,7 +1,12 @@
 // src/context/NicknameContext.jsx
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useWallet } from "./WalletContext";
-import { setNicknameDirect, setNicknameRelayed, getNickname } from "../utils/nicknameAPI";
+import {
+  setNicknameDirect,
+  setNicknameRelayed,
+  getNickname,
+  prepareNicknameRelayed,
+} from "../utils/nicknameAPI";
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const STORAGE_KEY = "theblock_nickname_settings_v2";
@@ -62,7 +67,6 @@ async function getProviderChainId(provider) {
 function isProbablyMobileMetaMask() {
   try {
     const ua = (navigator?.userAgent || "").toLowerCase();
-    // Not perfect, but good enough for messaging.
     return ua.includes("android") || ua.includes("iphone") || ua.includes("ipad");
   } catch {
     return false;
@@ -78,13 +82,7 @@ function withTimeout(promise, ms, onTimeoutMessage) {
 }
 
 export function NicknameProvider({ children }) {
-  const {
-    walletAddress,
-    provider,
-    isConnected,
-    chainId,
-    ensureChain,
-  } = useWallet();
+  const { walletAddress, provider, isConnected, chainId, ensureChain } = useWallet();
 
   const TARGET_CHAIN_ID = toChainId(import.meta.env.VITE_CHAIN_ID || 84532);
   const addrKey = useMemo(() => normalizeAddr(walletAddress), [walletAddress]);
@@ -97,6 +95,9 @@ export function NicknameProvider({ children }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  // ✅ Prepared payload so “Save Name” can go straight into signing on mobile
+  const [prepared, setPrepared] = useState(null);
+
   useEffect(() => {
     try {
       if (provider && typeof provider.request === "function") {
@@ -105,6 +106,7 @@ export function NicknameProvider({ children }) {
     } catch {}
   }, [provider]);
 
+  // Load local settings
   useEffect(() => {
     if (typeof window === "undefined") return;
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -117,6 +119,7 @@ export function NicknameProvider({ children }) {
     if (parsed.nicknames && typeof parsed.nicknames === "object") setNicknamesByAddr(parsed.nicknames);
   }, []);
 
+  // Persist local settings
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -129,10 +132,12 @@ export function NicknameProvider({ children }) {
     }
   }, [useNickname, nicknamesByAddr]);
 
+  // Wallet change: reset UI state for new wallet
   useEffect(() => {
     setModalOpen(false);
     setLoading(false);
     setHasOnchainNickname(false);
+    setPrepared(null);
 
     if (!addrKey) {
       setNicknameState("");
@@ -147,6 +152,7 @@ export function NicknameProvider({ children }) {
     }
   }, [addrKey, nicknamesByAddr]);
 
+  // Read on-chain nickname once per wallet connect/change
   useEffect(() => {
     if (!walletAddress) return;
 
@@ -177,6 +183,7 @@ export function NicknameProvider({ children }) {
 
           setModalOpen(false);
           setLoading(false);
+          setPrepared(null);
         } else {
           setHasOnchainNickname(false);
         }
@@ -191,9 +198,41 @@ export function NicknameProvider({ children }) {
     };
   }, [walletAddress]);
 
+  // ✅ When modal is open and nickname looks valid, precompute nonce/hash so Save is “gesture-safe”
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        if (!modalOpen) return;
+        if (!walletAddress || !isConnected) return;
+        if (hasOnchainNickname) return;
+
+        const n = String(nickname || "").trim();
+        if (n.length < 3 || n.length > 24) {
+          setPrepared(null);
+          return;
+        }
+
+        const prep = await prepareNicknameRelayed(n, walletAddress, provider);
+        if (!cancelled) setPrepared(prep);
+      } catch {
+        if (!cancelled) setPrepared(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen, nickname, walletAddress, isConnected, provider, hasOnchainNickname]);
+
+  // Local-only setter
   const setNickname = (val) => {
     const trimmed = (val || "").trim();
     setNicknameState(trimmed);
+
+    // invalidate prepared when user edits input
+    setPrepared(null);
 
     if (walletAddress) {
       const key = normalizeAddr(walletAddress);
@@ -217,7 +256,6 @@ export function NicknameProvider({ children }) {
     if (typeof ensureChain === "function") {
       await ensureChain(want);
 
-      // re-check after switch
       const afterProv = await getProviderChainId(provider);
       const afterCtx = toChainId(chainId);
       const after = afterProv || afterCtx;
@@ -247,22 +285,28 @@ export function NicknameProvider({ children }) {
     try {
       await ensureRightNetworkOrThrow();
 
-      // If MetaMask mobile deep-link hangs, we must not freeze forever.
       const timeoutMsg =
         `Signature request timed out.\n` +
         `If you're on mobile, open the dapp inside MetaMask (MetaMask app → Browser) OR connect via WalletConnect.\n` +
         `Then try again.`;
 
+      // ✅ ensure we have prepared data; if not, compute it now
+      let prep = prepared;
+      if (!prep || String(prep?.nick || "").trim() !== trimmed) {
+        prep = await prepareNicknameRelayed(trimmed, walletAddress, provider);
+        setPrepared(prep);
+      }
+
       try {
+        // Use prepared payload so Save click triggers signature quickly
         await withTimeout(
-          setNicknameRelayed(trimmed, walletAddress, provider),
-          45000,
+          setNicknameRelayed(trimmed, walletAddress, provider, prep),
+          45_000,
           timeoutMsg
         );
       } catch (e) {
         const allowDirect = envBool(import.meta.env.VITE_ALLOW_DIRECT_NICKNAME);
         if (!allowDirect) {
-          // Add a little extra hint for mobile users
           const extra = isProbablyMobileMetaMask()
             ? `\nMobile hint: MetaMask deep-links from Chrome sometimes don't show the confirm.\nUse MetaMask Browser or WalletConnect.`
             : "";
@@ -276,7 +320,7 @@ export function NicknameProvider({ children }) {
         await ensureRightNetworkOrThrow();
         await withTimeout(
           setNicknameDirect(trimmed, walletAddress, provider),
-          45000,
+          45_000,
           timeoutMsg
         );
       }
@@ -286,6 +330,7 @@ export function NicknameProvider({ children }) {
       setNicknameState(trimmed);
       setUseNickname(true);
       setHasOnchainNickname(true);
+      setPrepared(null);
 
       try {
         blockswapAdapter.setLabel({ walletAddress, label: trimmed });
@@ -301,6 +346,7 @@ export function NicknameProvider({ children }) {
   const askForNickname = () => {
     if (!walletAddress || !isConnected) return;
     if (hasOnchainNickname) return;
+    setPrepared(null);
     setModalOpen(true);
   };
 

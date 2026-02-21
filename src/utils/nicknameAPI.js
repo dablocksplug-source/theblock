@@ -347,11 +347,10 @@ async function signRawHash({ provider, chain, account, msgHash }) {
   const base =
     lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
 
-  // Add a strong hint for mobile deep-link problems
   if (isProbablyMobile()) {
     throw new Error(
       `${base}\n\nMobile tip: If you opened the dapp in Chrome/Safari and it kicked you into MetaMask, the confirm can fail to appear.\n` +
-      `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
+        `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
     );
   }
 
@@ -381,12 +380,12 @@ export async function getNickname(walletAddress) {
 }
 
 /**
- * Gasless nickname (relayer pays gas)
+ * ✅ PREPARE gasless nickname:
+ * Do RPC reads (chainId/nonce) BEFORE the user taps “Save Name”.
+ * This makes the actual Save click go straight into the signature prompt,
+ * which is critical for MetaMask Mobile reliability.
  */
-export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
-  const relayerUrl = resolveRelayerUrl();
-  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL (local .env.local + Vercel env).");
-
+export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
 
@@ -405,7 +404,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     transport: http(rpc, { timeout: 20_000, retryCount: 1, retryDelay: 450 }),
   });
 
-  // ✅ SOURCE OF TRUTH: chainId from RPC (matches relayer target)
+  // Source of truth is RPC chainId (matches relayer target)
   const rpcChainId = await withTimeout(
     pc.getChainId().catch(() => Number(C.CHAIN_ID)),
     12_000,
@@ -445,11 +444,53 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
     chainId: rpcChainId,
   });
 
-  dlog("env", { relayerUrl, registry, rpcChainId, walletChainId });
-  dlog("hash", { nonce: nonce?.toString?.() ?? String(nonce), deadline, msgHash });
+  dlog("prepare", { registry, rpcChainId, walletChainId, deadline, nonce: nonce?.toString?.() ?? String(nonce) });
 
-  const rawSigHex = await signRawHash({ provider, chain, account: user, msgHash });
-  dlog("signed", { rawSigLen: rawSigHex?.length });
+  return {
+    user,
+    nick: trimmed,
+    registry,
+    rpcChainId,
+    walletChainId,
+    nonce,
+    deadline,
+    msgHash,
+  };
+}
+
+/**
+ * Gasless nickname (relayer pays gas)
+ * If `prepared` is provided, we skip all pre-work and go straight to signing.
+ */
+export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, prepared) {
+  const relayerUrl = resolveRelayerUrl();
+  if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL (local .env.local + Vercel env).");
+
+  const user = walletAddress;
+  if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
+
+  const provider = eip1193Provider || (typeof window !== "undefined" ? window.ethereum : null);
+  if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 missing).");
+
+  const chain = chainFromConfig();
+
+  // ✅ If we have prepared values, do NOT do extra RPC calls here.
+  const prep = prepared || (await prepareNicknameRelayed(nick, walletAddress, provider));
+  const trimmed = String(prep?.nick || "").trim();
+
+  if (!trimmed || trimmed.length < 3 || trimmed.length > 24) {
+    throw new Error("Nickname must be 3–24 chars.");
+  }
+
+  dlog("hash", { deadline: prep.deadline, msgHash: prep.msgHash });
+
+  // 🔥 This is the critical part: on mobile, we want this triggered directly from the Save button.
+  const rawSigHex = await signRawHash({
+    provider,
+    chain,
+    account: user,
+    msgHash: prep.msgHash,
+  });
 
   const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
   dlog("normalized", { sigLen: signature?.length, v, r, s });
@@ -461,7 +502,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider) {
       body: JSON.stringify({
         user,
         nick: trimmed,
-        deadline,
+        deadline: prep.deadline,
         v,
         r,
         s,

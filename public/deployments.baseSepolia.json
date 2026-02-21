@@ -2,13 +2,13 @@
   "network": "baseSepolia",
   "chainId": 84532,
   "rpc": "https://base-sepolia.g.alchemy.com/v2/e8hqrtHhsnziVDKsd34vl",
-  "deployer": "0xb2b7438c699e5b2389a15094EBAF1640EB96cAEb",
+  "deployer": "0x5CA7541E7E7EA07DC0114D64090Df3f39AF5623c",
   "contracts": {
-    "MockUSDC": "0xbefe908a855ef8a5cde63c0e1729fac443035837",
-    "OZToken": "0xab48da141b44aeb9bc5dc3cb0ff2982f1c615830",
-    "BlockSwap": "0xa69111d06b627c2871ad4ad9351223dac2c2e39c",
-    "BlockRewardsMerkle": "0x119ae679658ae85e74c5b4cec3cae89a5455b30f",
-    "NicknameRegistryRelayed": "0x85459f66066562f84eeac0ebaa5c1695c9a58a46"
+    "MockUSDC": "0x4beb004e0e4b8cb779f5f5529288a7eaa15f7a39",
+    "OZToken": "0xe6a9ef7a0224e6cfb1a848d118c9e7621ca918bf",
+    "BlockSwap": "0x9078b75ddf593b31e0d0925ca04e2997fba07d7f",
+    "NicknameRegistryRelayed": "0xa9d9a1e8d71c7b64eebb873c63130ef91b5bf177",
+    "BlockRewardsMerkle": "0xdadb4ddbe30ed6dce84afbeee52a7a21a44db26c"
   },
   "params": {
     "reserve": "0x49d118023e6bCeB0E7c4e5b7925637563A0b9805",
