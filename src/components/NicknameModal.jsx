@@ -8,6 +8,15 @@ function errToString(e) {
   return String(e?.shortMessage || e?.message || e);
 }
 
+function isMobileish() {
+  try {
+    const ua = (navigator?.userAgent || "").toLowerCase();
+    return ua.includes("android") || ua.includes("iphone") || ua.includes("ipad");
+  } catch {
+    return false;
+  }
+}
+
 export default function NicknameModal() {
   const {
     modalOpen,
@@ -21,6 +30,8 @@ export default function NicknameModal() {
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
 
+  const mobile = isMobileish();
+
   // ✅ If nickname already exists on-chain, never show this modal (safety net)
   useEffect(() => {
     if (modalOpen && hasOnchainNickname) {
@@ -32,10 +43,6 @@ export default function NicknameModal() {
   useEffect(() => {
     if (!modalOpen) return;
     setErr("");
-
-    // If they already have any nickname (local/onchain), we still enforce create-only UI:
-    // - If hasOnchainNickname true, modal auto-closes above.
-    // - Otherwise, keep blank so they don't "edit" a local cache.
     setName("");
   }, [modalOpen]);
 
@@ -49,11 +56,7 @@ export default function NicknameModal() {
     return "This name is locked to your wallet forever.";
   }, [trimmed, hasOnchainNickname]);
 
-  const canSave =
-    !loading &&
-    !hasOnchainNickname &&
-    trimmed.length >= 3 &&
-    trimmed.length <= 24;
+  const canSave = !loading && !hasOnchainNickname && trimmed.length >= 3 && trimmed.length <= 24;
 
   const close = () => {
     setErr("");
@@ -71,7 +74,6 @@ export default function NicknameModal() {
     }
   };
 
-  // ✅ Don’t render if not open OR if on-chain nickname already exists
   if (!modalOpen || hasOnchainNickname) return null;
 
   return (
@@ -92,7 +94,20 @@ export default function NicknameModal() {
         </div>
 
         <div className="px-6 pb-6 pt-4">
-          <div className="text-sm text-white/70 mb-2">{helper}</div>
+          <div className="text-sm text-white/70 mb-3">{helper}</div>
+
+          {/* ✅ Mobile UX hint (this is the “user-friendly” win) */}
+          {mobile ? (
+            <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+              <div className="font-semibold text-amber-100 mb-1">Mobile tip</div>
+              If you opened the site in Chrome/Safari and it kicked you into MetaMask,
+              the “Sign” prompt can fail to appear.
+              <div className="mt-2 text-amber-200/90">
+                Best fix: open the site inside <b>MetaMask → Browser</b> or connect using{" "}
+                <b>WalletConnect</b>.
+              </div>
+            </div>
+          ) : null}
 
           <form onSubmit={onSubmit}>
             <input
@@ -127,10 +142,10 @@ export default function NicknameModal() {
               Nickname must be 3–24 characters. One-time set per wallet.
             </div>
 
-            {/* optional: tiny current nickname display (read-only) */}
             {nickname ? (
               <div className="mt-2 text-[11px] text-white/35">
-                Current cached name: <span className="text-white/50">{String(nickname)}</span>
+                Current cached name:{" "}
+                <span className="text-white/50">{String(nickname)}</span>
               </div>
             ) : null}
           </form>

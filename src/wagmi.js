@@ -8,17 +8,25 @@ const WALLETCONNECT_PROJECT_ID =
   import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ||
   "";
 
-// ✅ Canonical app URL (use www). Set this in Vercel env as VITE_APP_URL=https://www.theblock.live
+// ✅ Canonical app URL (use www). Set in Vercel env: VITE_APP_URL=https://www.theblock.live
 const APP_URL = (import.meta.env.VITE_APP_URL || "https://www.theblock.live").replace(/\/+$/, "");
 
-const chain =
-  Number(import.meta.env.VITE_CHAIN_ID || 84532) === base.id ? base : baseSepolia;
+// ✅ nice to have for WC metadata
+const ICON_URL =
+  (import.meta.env.VITE_APP_ICON_URL || `${APP_URL}/favicon.ico`).replace(/\/+$/, "");
+
+const chain = Number(import.meta.env.VITE_CHAIN_ID || 84532) === base.id ? base : baseSepolia;
 
 export const wagmiConfig = createConfig({
   chains: [chain],
   connectors: [
+    // MetaMask connector (injected / SDK behavior)
     metaMask(),
+
+    // Coinbase
     coinbaseWallet({ appName: "The Block" }),
+
+    // WalletConnect (ONLY if projectId provided)
     ...(WALLETCONNECT_PROJECT_ID
       ? [
           walletConnect({
@@ -28,8 +36,7 @@ export const wagmiConfig = createConfig({
               name: "The Block",
               description: "BlockSwap + Rewards",
               url: APP_URL,
-              // (optional but nice to have)
-              // icons: ["https://www.theblock.live/favicon.ico"],
+              icons: [ICON_URL],
             },
           }),
         ]

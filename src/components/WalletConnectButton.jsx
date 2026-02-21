@@ -84,6 +84,7 @@ export default function WalletConnectButton({
     connectWalletConnect,
     disconnectWallet,
     availableConnectors,
+    hardResetConnection, // ✅ added in WalletContext update
   } = useWallet();
 
   const {
@@ -157,7 +158,6 @@ export default function WalletConnectButton({
       if (e.key === "Escape") setOpen(false);
     };
 
-    // capture is intentional: we want to close even if other UI stops propagation later
     document.addEventListener("pointerdown", onDocPointerDown, true);
     document.addEventListener("keydown", onEsc);
 
@@ -167,12 +167,19 @@ export default function WalletConnectButton({
     };
   }, [open, debug]);
 
-  // ✅ If mobile/desktop mode changes while open, close to avoid wrong UI
+  // ✅ If mobile/desktop mode changes while open, close
   useEffect(() => {
     if (!open) return;
     setOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
+
+  // ✅ If connect state changes while menu open, close (prevents weird stuck UI)
+  useEffect(() => {
+    if (!open) return;
+    setOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected]);
 
   // ✅ Lock page scroll ONLY while mobile sheet open
   useEffect(() => {
@@ -240,10 +247,11 @@ export default function WalletConnectButton({
     open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
-            {/* Backdrop: ALWAYS CLOSE (do NOT toggle) */}
+            {/* Backdrop: ALWAYS CLOSE */}
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
               onClick={(e) => {
+                e.preventDefault();
                 e.stopPropagation();
                 setOpen(false);
               }}
@@ -303,7 +311,7 @@ export default function WalletConnectButton({
                     </button>
 
                     <div className="px-4 py-4 text-sm text-slate-400 border-t border-slate-800/70">
-                      Pick a wallet — no auto-connect.
+                      Tip: on mobile, best experience is using the wallet’s in-app browser.
                     </div>
                   </>
                 ) : (
@@ -364,6 +372,26 @@ export default function WalletConnectButton({
                         }}
                       >
                         Switch network
+                      </button>
+                    ) : null}
+
+                    {/* ✅ Mobile escape hatch */}
+                    {typeof hardResetConnection === "function" ? (
+                      <button
+                        type="button"
+                        className="w-full px-4 py-4 text-left text-base text-amber-200 hover:bg-slate-900"
+                        onClick={() => {
+                          try {
+                            setLocalErr("");
+                            hardResetConnection();
+                            toast("Reset done ✅");
+                            setOpen(false);
+                          } catch (e) {
+                            bubbleErr(e?.message || "Reset failed.");
+                          }
+                        }}
+                      >
+                        Reset wallet session (mobile fix)
                       </button>
                     ) : null}
 
@@ -519,7 +547,7 @@ export default function WalletConnectButton({
   return (
     <div ref={rootRef} className="relative">
       {localErr ? (
-        <div className="mb-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+        <div className="mb-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200 whitespace-pre-wrap">
           {localErr}
         </div>
       ) : null}
@@ -528,7 +556,7 @@ export default function WalletConnectButton({
         type="button"
         className={!isConnected ? connectBtnCls : connectedBtnCls + " " + connectedTone}
         onClick={(e) => {
-          // ✅ Click is most compatible with MetaMask in-app browser
+          e.preventDefault();
           e.stopPropagation();
           if (debug) console.log("[WalletConnectButton] toggle(click)", { next: !open, isMobile });
           setOpen((v) => !v);

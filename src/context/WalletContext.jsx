@@ -20,6 +20,15 @@ function norm(s) {
   return String(s || "").toLowerCase().trim();
 }
 
+function isMobileish() {
+  try {
+    const ua = (navigator?.userAgent || "").toLowerCase();
+    return ua.includes("android") || ua.includes("iphone") || ua.includes("ipad");
+  } catch {
+    return false;
+  }
+}
+
 function findConnector(connectors, { ids = [], nameIncludes = [] } = {}) {
   const list = Array.isArray(connectors) ? connectors : [];
 
@@ -35,7 +44,6 @@ function findConnector(connectors, { ids = [], nameIncludes = [] } = {}) {
 }
 
 function pickMetaMask(connectors) {
-  // wagmi v2 metaMask() connector id is typically "metaMask"
   return findConnector(connectors, {
     ids: ["metamask", "metaMask", "io.metamask", "injected", "metamasksdk"],
     nameIncludes: ["metamask"],
@@ -43,7 +51,6 @@ function pickMetaMask(connectors) {
 }
 
 function pickCoinbase(connectors) {
-  // wagmi v2 coinbaseWallet() id is typically "coinbaseWallet"
   return findConnector(connectors, {
     ids: ["coinbasewallet", "coinbaseWallet", "coinbasewalletsdk"],
     nameIncludes: ["coinbase"],
@@ -51,7 +58,6 @@ function pickCoinbase(connectors) {
 }
 
 function pickWalletConnect(connectors) {
-  // wagmi v2 walletConnect() id is typically "walletConnect"
   return findConnector(connectors, {
     ids: ["walletconnect", "walletConnect", "walletconnectv2", "walletconnectsdk"],
     nameIncludes: ["walletconnect"],
@@ -67,6 +73,20 @@ function isPendingPermissionsError(e) {
   );
 }
 
+function looksInjectedProvider(p) {
+  // We only want this check as a heuristic.
+  // MetaMask injected provider usually has isMetaMask=true.
+  // WalletConnect provider often has a session field or isWalletConnect flag.
+  try {
+    if (!p) return false;
+    if (p.isMetaMask) return true;
+    if (p.provider?.isMetaMask) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function WalletProvider({ children }) {
   const { address, isConnected, chainId, connector } = useAccount();
   const { connectAsync, connectors, status, error } = useConnect();
@@ -79,7 +99,6 @@ export function WalletProvider({ children }) {
   const [provider, setProvider] = useState(null);
 
   const availableConnectors = useMemo(() => {
-    // include "ready" if present (wagmi v2 connectors usually expose it)
     return (connectors || []).map((c) => ({
       id: c?.id,
       name: c?.name,
@@ -115,9 +134,7 @@ export function WalletProvider({ children }) {
   }, [isConnected, connector, setAdapterProviderFromConnector]);
 
   const connectWith = useCallback(
-    async (c, label = "wallet") => {
-      const list = Array.isArray(connectors) ? connectors : [];
-
+    async (c, label = "wallet", { enforceWalletConnect = false } = {}) => {
       if (!c) {
         throw new Error(
           `Connector not available for ${label}.\nAvailable: ${(availableConnectors || [])
@@ -126,7 +143,6 @@ export function WalletProvider({ children }) {
         );
       }
 
-      // If connector exposes "ready" and it's false, block with a clear message
       if (typeof c?.ready === "boolean" && c.ready === false) {
         throw new Error(
           `${label} connector is not ready on this device/browser.\nTry a different wallet option or open the site inside the wallet browser.`
@@ -144,11 +160,32 @@ export function WalletProvider({ children }) {
 
       try {
         // ✅ IMPORTANT FOR MOBILE: pass chainId hint
-        // Many mobile wallets behave better when chainId is supplied.
         const res = await connectAsync({ connector: c, chainId: TARGET_CHAIN_ID });
 
         // sync adapter provider
         await setAdapterProviderFromConnector(c);
+
+        // ✅ If user chose WalletConnect, make sure we didn't accidentally end up with injected provider
+        if (enforceWalletConnect) {
+          const p = await c.getProvider?.().catch(() => null);
+
+          // If provider looks like MetaMask injected, it means the flow got hijacked
+          if (looksInjectedProvider(p)) {
+            // clean disconnect to avoid weird stuck state
+            try {
+              disconnect();
+            } catch {}
+
+            blockswapAdapter.setProvider(null);
+            setProvider(null);
+
+            throw new Error(
+              isMobileish()
+                ? "WalletConnect got routed into MetaMask injected connect.\n\nFix:\n• Use WalletConnect with a non-MetaMask wallet OR\n• Open the site inside MetaMask Browser (works best) OR\n• Temporarily disable other injected wallets in the browser.\n\nThen try WalletConnect again."
+                : "WalletConnect got routed into an injected wallet connection.\nTry WalletConnect again, or disable injected wallet extensions temporarily."
+            );
+          }
+        }
 
         return res;
       } catch (e) {
@@ -157,13 +194,18 @@ export function WalletProvider({ children }) {
             "Wallet request already pending.\nOpen your wallet and approve/close the existing request, then try again."
           );
         }
-        // Some wallets throw vague errors — surface as much as we can
         throw new Error(e?.shortMessage || e?.message || String(e));
       } finally {
         connectInFlightRef.current = false;
       }
     },
-    [connectAsync, setAdapterProviderFromConnector, availableConnectors, status, connectors]
+    [
+      connectAsync,
+      setAdapterProviderFromConnector,
+      availableConnectors,
+      status,
+      disconnect,
+    ]
   );
 
   const connectMetaMask = useCallback(async () => {
@@ -193,7 +235,8 @@ export function WalletProvider({ children }) {
         "WalletConnect connector not found.\nMake sure VITE_WC_PROJECT_ID is set in Vercel + local env."
       );
     }
-    return connectWith(c, "WalletConnect");
+    // ✅ enforce true WC session (don’t silently fall into injected)
+    return connectWith(c, "WalletConnect", { enforceWalletConnect: true });
   }, [connectors, connectWith]);
 
   const connectWallet = useCallback(async () => {
@@ -216,6 +259,34 @@ export function WalletProvider({ children }) {
     },
     [switchChainAsync, chainId]
   );
+
+  // ✅ Hard reset: useful when mobile keeps reconnecting same account/session
+  const hardResetConnection = useCallback(() => {
+    try {
+      connectInFlightRef.current = false;
+    } catch {}
+    try {
+      disconnect();
+    } catch {}
+
+    try {
+      blockswapAdapter.setProvider(null);
+    } catch {}
+    setProvider(null);
+
+    // Clear some walletconnect storage keys (best-effort; safe)
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const keys = Object.keys(window.localStorage);
+        for (const k of keys) {
+          if (k.toLowerCase().includes("walletconnect") || k.toLowerCase().includes("wagmi")) {
+            // don’t nuke everything, only relevant keys
+            window.localStorage.removeItem(k);
+          }
+        }
+      }
+    } catch {}
+  }, [disconnect]);
 
   const disconnectWallet = useCallback(() => {
     try {
@@ -250,6 +321,9 @@ export function WalletProvider({ children }) {
       connectWalletConnect,
       disconnectWallet,
 
+      // ✅ for tough mobile cases
+      hardResetConnection,
+
       ensureChain,
       switching,
 
@@ -257,7 +331,6 @@ export function WalletProvider({ children }) {
       connectError: error?.message || null,
       availableConnectors,
 
-      // handy for debugging UI if needed
       targetChainId: TARGET_CHAIN_ID,
     }),
     [
@@ -270,6 +343,7 @@ export function WalletProvider({ children }) {
       connectCoinbase,
       connectWalletConnect,
       disconnectWallet,
+      hardResetConnection,
       ensureChain,
       switching,
       status,
