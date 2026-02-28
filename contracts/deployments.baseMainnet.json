@@ -1,12 +1,14 @@
 {
-  "network": "baseMainnet",
+  "network": "base",
   "chainId": 8453,
   "rpc": "https://base-mainnet.g.alchemy.com/v2/oRNy0FTweTzgC-YfHJik_",
   "deployer": "0xbC157B646Bc0230d22D5AdD7d02a5F224Cb27D61",
   "contracts": {
     "OZToken": "0xba02d1e94a590bada145ee7118aa366e196e9ce5",
     "BlockSwap": "0x6954dd819abbb35a32577fc73f8ef7adfec02d93",
-    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "NicknameRegistryRelayed": "0x3838e287c2e8cbaac49afdbf133752fbba53b1a3",
+    "BlockRewardsMerkle": "0x72ef63edcd3e538d2015783bc5a6e61907610333"
   },
   "params": {
     "reserve": "0xD96bB8887e694C12f74F5347D91440064C4f435E",
@@ -20,6 +22,10 @@
     "seeded": "true",
     "startPaused": "true",
     "owner": "0xbC157B646Bc0230d22D5AdD7d02a5F224Cb27D61",
-    "forceMockUsdc": "false"
+    "forceMockUsdc": "false",
+    "nicknameRelayer": "0x38468f5678E79222aDAD1C8d5002a31994cBF146",
+    "rewardsOwner": "0xbC157B646Bc0230d22D5AdD7d02a5F224Cb27D61",
+    "rewardsUSDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "rewardsTreasury": "0xEB77AB73e5504d92C385BBD4e2Fc0fB03C108f05"
   }
 }

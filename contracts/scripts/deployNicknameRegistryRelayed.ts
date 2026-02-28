@@ -1,15 +1,21 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
-import { createPublicClient, createWalletClient, http, isAddress } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddress,
+  formatEther,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, base } from "viem/chains";
 
 import NicknameRegistryRelayed from "../artifacts/contracts/NicknameRegistryRelayed.sol/NicknameRegistryRelayed.json";
 
-const FILE_CONTRACTS = "deployments.baseSepolia.json";
-const FILE_PUBLIC = path.join("..", "public", "deployments.baseSepolia.json");
-
+// --------------------
+// helpers
+// --------------------
 function mustEnv(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var ${name}`);
@@ -27,49 +33,120 @@ async function mustConfirm(publicClient: any, hash: `0x${string}`) {
   return r;
 }
 
-function writeDeploymentsBoth(deployments: any) {
-  fs.writeFileSync(FILE_CONTRACTS, JSON.stringify(deployments, null, 2));
-  console.log("✅ Wrote", FILE_CONTRACTS);
-
-  const dir = path.dirname(FILE_PUBLIC);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  fs.writeFileSync(FILE_PUBLIC, JSON.stringify(deployments, null, 2));
-  console.log("✅ Wrote", FILE_PUBLIC, "(UI fetch path: /deployments.baseSepolia.json)");
-}
-
-function readExistingDeployments(): any {
+function safeReadJson(p: string) {
   try {
-    if (fs.existsSync(FILE_CONTRACTS)) {
-      return JSON.parse(fs.readFileSync(FILE_CONTRACTS, "utf8"));
-    }
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch {}
-  return { network: "baseSepolia", chainId: baseSepolia.id, contracts: {}, params: {} };
+  return null;
 }
 
+function ensureDirForFile(filePath: string) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function writeJson(filePath: string, obj: any) {
+  ensureDirForFile(filePath);
+  fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
+}
+
+function pickRpcCandidate() {
+  // Prefer explicit RPC vars; do NOT rely on VITE_* here (contracts scripts)
+  // If you have both set, we'll try MAINNET first.
+  const main = String(process.env.BASE_MAINNET_RPC || "").trim();
+  const sep = String(process.env.BASE_SEPOLIA_RPC || "").trim();
+
+  // Allow legacy fallback if you happened to store RPC_URL:
+  const rpcUrl = String(process.env.RPC_URL || "").trim();
+
+  // Priority:
+  // 1) BASE_MAINNET_RPC
+  // 2) BASE_SEPOLIA_RPC
+  // 3) RPC_URL
+  // 4) default sepolia public
+  return main || sep || rpcUrl || "https://sepolia.base.org";
+}
+
+function resolveFileTargets(chainId: number) {
+  if (chainId === base.id) {
+    return {
+      networkName: "base",
+      chainId: base.id,
+      contractsFile: "deployments.baseMainnet.json",
+      publicFile: path.join("..", "public", "deployments.base.json"),
+      publicFetchPath: "/deployments.base.json",
+    };
+  }
+  if (chainId === baseSepolia.id) {
+    return {
+      networkName: "baseSepolia",
+      chainId: baseSepolia.id,
+      contractsFile: "deployments.baseSepolia.json",
+      publicFile: path.join("..", "public", "deployments.baseSepolia.json"),
+      publicFetchPath: "/deployments.baseSepolia.json",
+    };
+  }
+  throw new Error(`Unsupported chainId ${chainId}. Expected 8453 (Base) or 84532 (Base Sepolia).`);
+}
+
+// --------------------
+// main
+// --------------------
 async function main() {
-  const RPC =
-    process.env.BASE_SEPOLIA_RPC ||
-    process.env.VITE_RPC_URL ||
-    "https://sepolia.base.org";
+  const RPC = pickRpcCandidate();
+
+  // Start with a "neutral" client to detect chainId from the RPC
+  const probeClient = createPublicClient({ transport: http(RPC, { timeout: 20_000, retryCount: 2, retryDelay: 350 }) });
+  const liveChainId = await probeClient.getChainId();
+
+  const chain = liveChainId === base.id ? base : liveChainId === baseSepolia.id ? baseSepolia : null;
+  if (!chain) {
+    throw new Error(`RPC returned chainId=${liveChainId}. This script only supports Base (8453) and Base Sepolia (84532).`);
+  }
+
+  const files = resolveFileTargets(liveChainId);
 
   const pk = mustEnv("DEPLOYER_PRIVATE_KEY") as `0x${string}`;
   const account = privateKeyToAccount(pk);
 
-  const owner = mustAddr("OWNER (DEPLOYER)", account.address);
+  // Contract owner = deployer unless you explicitly override OWNER_WALLET
+  const owner =
+    process.env.OWNER_WALLET && isAddress(process.env.OWNER_WALLET)
+      ? (process.env.OWNER_WALLET as `0x${string}`)
+      : (account.address as `0x${string}`);
+
   const nicknameRelayer = mustAddr("RELAYER_WALLET", mustEnv("RELAYER_WALLET"));
 
-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC) });
-  const walletClient = createWalletClient({ chain: baseSepolia, transport: http(RPC), account });
+  const publicClient = createPublicClient({
+    chain,
+    transport: http(RPC, { timeout: 20_000, retryCount: 2, retryDelay: 350 }),
+  });
 
-  const liveChainId = await publicClient.getChainId();
+  const walletClient = createWalletClient({
+    chain,
+    transport: http(RPC, { timeout: 20_000, retryCount: 2, retryDelay: 350 }),
+    account,
+  });
+
+  const balWei = await publicClient.getBalance({ address: account.address });
   console.log("RPC:", RPC);
   console.log("ChainId:", liveChainId);
+  console.log("Target :", `${chain.name} (expected ${chain.id})`);
   console.log("Deployer:", account.address);
+  console.log("Balance :", `${formatEther(balWei)} ETH`);
+  console.log("Owner   :", owner);
+  console.log("Relayer :", nicknameRelayer);
+  console.log("Will write:");
+  console.log(" -", files.contractsFile);
+  console.log(" -", files.publicFile, `(UI fetch path: ${files.publicFetchPath})`);
 
-  if (liveChainId !== baseSepolia.id) {
-    throw new Error(`Wrong chainId from RPC. Expected ${baseSepolia.id}, got ${liveChainId}. Fix BASE_SEPOLIA_RPC.`);
-  }
+  // Read existing deployments for this network (if present)
+  const existing = safeReadJson(files.contractsFile) || {
+    network: files.networkName,
+    chainId: files.chainId,
+    contracts: {},
+    params: {},
+  };
 
   console.log("\n▶ Deploying NicknameRegistryRelayed...");
   const hash = await walletClient.deployContract({
@@ -82,25 +159,29 @@ async function main() {
   const NICK = rcpt.contractAddress!;
   console.log("✅ NicknameRegistryRelayed:", NICK);
 
-  const deployments = readExistingDeployments();
   const next = {
-    ...deployments,
-    network: "baseSepolia",
-    chainId: baseSepolia.id,
+    ...existing,
+    network: files.networkName,
+    chainId: files.chainId,
     rpc: RPC,
     deployer: account.address,
     contracts: {
-      ...(deployments.contracts || {}),
+      ...(existing.contracts || {}),
       NicknameRegistryRelayed: NICK,
     },
     params: {
-      ...(deployments.params || {}),
+      ...(existing.params || {}),
       nicknameRelayer,
+      owner,
     },
   };
 
-  console.log("\n✅ Writing deployments (with NicknameRegistryRelayed)...");
-  writeDeploymentsBoth(next);
+  console.log("\n✅ Writing deployments...");
+  writeJson(files.contractsFile, next);
+  console.log("✅ Wrote", files.contractsFile);
+
+  writeJson(files.publicFile, next);
+  console.log("✅ Wrote", files.publicFile, `(UI fetch path: ${files.publicFetchPath})`);
 
   console.log("\nDONE ✅");
 }
