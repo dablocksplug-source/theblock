@@ -7,15 +7,14 @@ import {
   isAddress,
   parseUnits,
   formatUnits,
+  getAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, base } from "viem/chains";
 
 import MockUSDC from "../artifacts/contracts/MockUSDC.sol/MockUSDC.json";
 import OZToken from "../artifacts/contracts/OZToken.sol/OZToken.json";
 import BlockSwap from "../artifacts/contracts/BlockSwap.sol/BlockSwap.json";
-
-const FILE = "deployments.baseSepolia.json";
 
 // --------------------
 // helpers
@@ -26,9 +25,24 @@ function mustEnv(name: string) {
   return v;
 }
 
+function optEnv(name: string) {
+  const v = process.env[name];
+  return v ? String(v).trim() : "";
+}
+
 function mustAddr(name: string, v: string): `0x${string}` {
-  if (!isAddress(v)) throw new Error(`Invalid address for ${name}: ${v}`);
-  return v as `0x${string}`;
+  const s = String(v || "").trim();
+  // Allow lowercase / non-checksummed by normalizing.
+  // getAddress throws if not a valid 20-byte hex address.
+  try {
+    const norm = getAddress(s);
+    return norm as `0x${string}`;
+  } catch {
+    // Keep the old strict message for clarity
+    if (!isAddress(s)) throw new Error(`Invalid address for ${name}: ${v}`);
+    // If isAddress passes but getAddress fails (rare), still throw
+    throw new Error(`Invalid address (checksum) for ${name}: ${v}`);
+  }
 }
 
 async function mustConfirm(publicClient: any, hash: `0x${string}`) {
@@ -87,11 +101,15 @@ function fmt18(n: bigint) {
 // main
 // --------------------
 async function main() {
-  // ✅ prefer your env var, but keep a safe default
+  // Determine which chain we are targeting (defaults to baseSepolia if not provided)
+  const targetChainId = Number(optEnv("CHAIN_ID") || optEnv("TARGET_CHAIN_ID") || "84532");
+  const chain = targetChainId === base.id ? base : baseSepolia;
+
+  // Choose RPC based on chain
   const RPC = (
-    process.env.BASE_SEPOLIA_RPC ||
-    process.env.RPC_URL ||
-    "https://sepolia.base.org"
+    (chain.id === base.id ? optEnv("BASE_MAINNET_RPC") : optEnv("BASE_SEPOLIA_RPC")) ||
+    optEnv("RPC_URL") ||
+    (chain.id === base.id ? "https://mainnet.base.org" : "https://sepolia.base.org")
   ).trim();
 
   const pk = mustEnv("DEPLOYER_PRIVATE_KEY") as `0x${string}`;
@@ -104,7 +122,7 @@ async function main() {
   // Optional: if you want the owner to be a different wallet than deployer
   const owner =
     process.env.OWNER_WALLET && isAddress(process.env.OWNER_WALLET)
-      ? (process.env.OWNER_WALLET as `0x${string}`)
+      ? (mustAddr("OWNER_WALLET", process.env.OWNER_WALLET) as `0x${string}`)
       : account.address;
 
   // OZ supply split (whole ounces)
@@ -118,13 +136,21 @@ async function main() {
   // Lock behavior on fresh deploy
   const START_PAUSED = true; // set false if you want buys live immediately
 
+  // USDC behavior:
+  // - On mainnet: use native USDC by default
+  // - On sepolia: deploy MockUSDC by default
+  const FORCE_MOCK_USDC = optEnv("FORCE_MOCK_USDC").toLowerCase() === "true";
+
+  // Lowercased native USDC (Base mainnet) — will be checksummed by mustAddr/getAddress
+  const NATIVE_USDC_MAINNET = "0x833589fcD6edb6e08f4c7c32d4f71b54bda02913".toLowerCase();
+
   const publicClient = createPublicClient({
-    chain: baseSepolia,
+    chain,
     transport: http(RPC, { timeout: 15_000, retryCount: 2, retryDelay: 350 }),
   });
 
   const walletClient = createWalletClient({
-    chain: baseSepolia,
+    chain,
     transport: http(RPC, { timeout: 15_000, retryCount: 2, retryDelay: 350 }),
     account,
   });
@@ -132,29 +158,45 @@ async function main() {
   const liveChainId = await publicClient.getChainId();
   console.log("RPC:", RPC);
   console.log("ChainId:", liveChainId);
+  console.log("Target :", chain.name, `(expected ${chain.id})`);
   console.log("Deployer:", account.address);
   console.log("Owner   :", owner);
   console.log("Reserve :", reserve);
   console.log("Treasury:", treasury);
   console.log("Relayer :", relayer);
 
-  if (liveChainId !== baseSepolia.id) {
+  if (liveChainId !== chain.id) {
     throw new Error(
-      `Wrong chainId from RPC. Expected ${baseSepolia.id} (baseSepolia), got ${liveChainId}. Fix BASE_SEPOLIA_RPC / RPC_URL.`
+      `Wrong chainId from RPC. Expected ${chain.id} (${chain.name}), got ${liveChainId}. Fix RPC env vars.`
     );
   }
 
-  // 1) Deploy MockUSDC
-  console.log("\n▶ Deploying MockUSDC...");
-  const usdcHash = await walletClient.deployContract({
-    abi: MockUSDC.abi,
-    bytecode: MockUSDC.bytecode as `0x${string}`,
-    args: [owner],
-  });
-  const usdcRcpt = await mustConfirm(publicClient, usdcHash);
-  const USDC = usdcRcpt.contractAddress!;
-  console.log("✅ MockUSDC:", USDC);
-  await assertHasCode(publicClient, "MockUSDC", USDC);
+  // Output file
+  const FILE =
+    chain.id === base.id ? "deployments.baseMainnet.json" : "deployments.baseSepolia.json";
+
+  // 1) USDC
+  let USDC: `0x${string}`;
+
+  if (chain.id === base.id && !FORCE_MOCK_USDC) {
+    // mainnet: use native USDC unless explicitly overridden
+    const envUsdcRaw = optEnv("USDC_ADDRESS") || optEnv("USDC");
+    const pickedRaw = envUsdcRaw || NATIVE_USDC_MAINNET;
+    USDC = mustAddr("USDC_ADDRESS", pickedRaw);
+    console.log("\n✅ Using native USDC (no deployment):", USDC);
+  } else {
+    // testnet (or forced mock): deploy MockUSDC
+    console.log("\n▶ Deploying MockUSDC...");
+    const usdcHash = await walletClient.deployContract({
+      abi: MockUSDC.abi,
+      bytecode: MockUSDC.bytecode as `0x${string}`,
+      args: [owner],
+    });
+    const usdcRcpt = await mustConfirm(publicClient, usdcHash);
+    USDC = usdcRcpt.contractAddress!;
+    console.log("✅ MockUSDC:", USDC);
+    await assertHasCode(publicClient, "MockUSDC", USDC);
+  }
 
   // 2) Deploy OZToken
   console.log("\n▶ Deploying OZToken...");
@@ -188,11 +230,14 @@ async function main() {
 
   // Write deployments EARLY so you can inspect even if seed fails
   const deployments: any = {
-    network: "baseSepolia",
-    chainId: baseSepolia.id,
+    network: chain.id === base.id ? "baseMainnet" : "baseSepolia",
+    chainId: chain.id,
     rpc: RPC,
     deployer: account.address,
-    contracts: { MockUSDC: USDC, OZToken: OZ, BlockSwap: SWAP },
+    contracts:
+      chain.id === base.id && !FORCE_MOCK_USDC
+        ? { OZToken: OZ, BlockSwap: SWAP, USDC }
+        : { MockUSDC: USDC, OZToken: OZ, BlockSwap: SWAP },
     params: {
       reserve,
       treasury,
@@ -205,6 +250,7 @@ async function main() {
       seeded: "false",
       startPaused: String(START_PAUSED),
       owner,
+      forceMockUsdc: String(FORCE_MOCK_USDC),
     },
   };
   writeJson(FILE, deployments);

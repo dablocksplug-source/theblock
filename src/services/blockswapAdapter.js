@@ -16,6 +16,7 @@ import {
   encodeAbiParameters,
   toHex,
   signatureToHex,
+  getAddress, // ✅ NEW: checksum-normalize addresses safely
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -83,13 +84,25 @@ function chainFromConfig() {
 }
 
 function mustAddr(label, v) {
-  if (!isAddress(v)) throw new Error(`Bad ${label} address: ${v}`);
-  return v;
+  const s = String(v || "").trim();
+  // ✅ normalize & checksum; accepts lower/upper/mixed case safely
+  try {
+    return getAddress(s);
+  } catch {
+    if (!isAddress(s)) throw new Error(`Bad ${label} address: ${v}`);
+    // rare: isAddress true but getAddress throws checksum-related
+    throw new Error(`Bad ${label} address (checksum): ${v}`);
+  }
 }
 
 // deployments loader
 let __deploymentsCache = { atMs: 0, data: null };
-const DEPLOYMENTS_URL = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+
+// ✅ FIX: mainnet file name should match what we copied to /public
+// - mainnet:  /deployments.baseMainnet.json
+// - sepolia:   /deployments.baseSepolia.json
+const DEPLOYMENTS_URL =
+  Number(C.CHAIN_ID) === 8453 ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
 
 async function loadDeployments({ ttlMs = 4000 } = {}) {
   const now = Date.now();
@@ -295,9 +308,12 @@ function looksLikeAlchemyMissingKey(url) {
 
 function resolveRpcUrl() {
   const chain = chainFromConfig();
+
+  // ✅ include mainnet-specific env too
   const rpc =
     sanitizeUrl(C.RPC_URL) ||
     sanitizeUrl(import.meta.env.VITE_RPC_URL) ||
+    sanitizeUrl(import.meta.env.VITE_BASE_MAINNET_RPC) ||
     sanitizeUrl(import.meta.env.VITE_BASE_SEPOLIA_RPC) ||
     chain?.rpcUrls?.default?.http?.[0] ||
     chain?.rpcUrls?.public?.http?.[0];
@@ -552,16 +568,8 @@ export const blockswapAdapter = {
     if (!walletAddress) throw new Error("Connect wallet.");
 
     // accept either naming scheme
-    const sellStr =
-      args?.sellPricePerBrick ??
-      args?.sellPerBrick ??
-      args?.sell ??
-      "";
-    const floorStr =
-      args?.buybackFloorPerBrick ??
-      args?.floorPerBrick ??
-      args?.floor ??
-      "";
+    const sellStr = args?.sellPricePerBrick ?? args?.sellPerBrick ?? args?.sell ?? "";
+    const floorStr = args?.buybackFloorPerBrick ?? args?.floorPerBrick ?? args?.floor ?? "";
 
     const sell6 = toBn6(sellStr);
     const floor6 = toBn6(floorStr);
