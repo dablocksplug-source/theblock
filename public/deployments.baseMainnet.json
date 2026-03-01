@@ -6,8 +6,10 @@
   "contracts": {
     "OZToken": "0xba02d1e94a590bada145ee7118aa366e196e9ce5",
     "BlockSwap": "0x6954dd819abbb35a32577fc73f8ef7adfec02d93",
-    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "NicknameRegistryRelayed": "0x3838e287c2e8cbaac49afdbf133752fbba53b1a3"
   },
+
   "params": {
     "reserve": "0xD96bB8887e694C12f74F5347D91440064C4f435E",
     "treasury": "0xEB77AB73e5504d92C385BBD4e2Fc0fB03C108f05",
