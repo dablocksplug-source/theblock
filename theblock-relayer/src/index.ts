@@ -56,6 +56,9 @@ const SYNC_ON_RELAY_DELAY_MS = Number(ENV.SYNC_ON_RELAY_DELAY_MS || 2500);
 // optional admin key for /admin/sync-now
 const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
 
+// NEW: allow Vercel previews only when explicitly enabled
+const ALLOW_VERCEL_PREVIEWS = String(ENV.ALLOW_VERCEL_PREVIEWS || "0") === "1";
+
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
 if (!BLOCKSWAP_ADDRESS || !isAddress(BLOCKSWAP_ADDRESS)) {
@@ -191,6 +194,17 @@ const EVT_SOLD = parseAbiItem("event SoldBack(address indexed seller, uint256 oz
 const app = express();
 app.set("trust proxy", 1);
 
+// Basic hardening headers (no dependencies)
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  // APIs generally shouldn't be cached by shared caches
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+
 // Safe JSON (stringify bigint)
 function sendJson(res: any, obj: any, status = 200) {
   return res
@@ -200,17 +214,14 @@ function sendJson(res: any, obj: any, status = 200) {
 }
 
 // --------------------
-// CORS
+// CORS allowlist + Origin enforcement
 // --------------------
 const allowlist = new Set<string>([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
 
- 
-
   "https://theblock.live",
   "https://www.theblock.live",
-  
 ]);
 
 if (UI_ORIGIN) allowlist.add(UI_ORIGIN);
@@ -220,11 +231,19 @@ const vercelPreviewRegexes: RegExp[] = [
   /^https:\/\/theblock-ui(-[a-z0-9-]+)?\.vercel\.app$/i,
 ];
 
+function isAllowedOrigin(origin: string | undefined | null) {
+  if (!origin) return false;
+  if (allowlist.has(origin)) return true;
+  if (ALLOW_VERCEL_PREVIEWS && vercelPreviewRegexes.some((re) => re.test(origin))) return true;
+  return false;
+}
+
+// CORS is only meaningful for browsers; we still keep it correct.
 const corsOptions: cors.CorsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (allowlist.has(origin)) return cb(null, true);
-    if (vercelPreviewRegexes.some((re) => re.test(origin))) return cb(null, true);
+    // If no Origin header, don't set CORS headers. (curl/uptime checks won't care.)
+    if (!origin) return cb(null, false);
+    if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "OPTIONS"],
@@ -246,15 +265,26 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   return next(err);
 });
 
+// Enforce Origin on sensitive endpoints (real blocking)
+// Note: Origin can be spoofed by non-browsers, but this blocks casual cross-site and mistakes.
+function requireAllowedOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const origin = String(req.headers.origin || "").trim();
+  if (!origin || !isAllowedOrigin(origin)) {
+    return sendJson(res, { ok: false, error: "forbidden_origin" }, 403);
+  }
+  return next();
+}
+
 // --------------------
-// tiny rate limit
+// rate limit (dependency-free, per-route buckets)
 // --------------------
 const bucket = new Map<string, { n: number; resetAt: number }>();
-function hit(ip: string, limit: number, windowMs: number) {
+
+function hit(key: string, limit: number, windowMs: number) {
   const now = Date.now();
-  const cur = bucket.get(ip);
+  const cur = bucket.get(key);
   if (!cur || now > cur.resetAt) {
-    bucket.set(ip, { n: 1, resetAt: now + windowMs });
+    bucket.set(key, { n: 1, resetAt: now + windowMs });
     return true;
   }
   if (cur.n >= limit) return false;
@@ -267,6 +297,10 @@ function getIp(req: express.Request) {
   const s = (Array.isArray(xf) ? xf[0] : xf || "").toString();
   const first = s.split(",")[0]?.trim();
   return first || req.socket.remoteAddress || "unknown";
+}
+
+function rateKey(req: express.Request, suffix: string) {
+  return `${getIp(req)}:${suffix}`;
 }
 
 function zodMsg(e: any) {
@@ -308,6 +342,7 @@ const BuySchema = z.object({
 const BuyPermitSchema = z.object({
   user: zAnyString,
   ozWei: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
+
 
   buyDeadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
   buyV: zAnyOptionalNumber,
@@ -382,11 +417,6 @@ function toIntStringSafe(v: any): string {
 
 // --------------------
 // signature parsing (ACCEPT v/r/s OR signature string)
-// Accept signature formats:
-// - 64-byte compact EIP-2098: 0x + 128 hex (len 130 chars total)
-// - 65-byte:                  0x + 130 hex (len 132 chars total)
-// - 66-byte weird:            0x + 132 hex (len 134 chars total) -> use last byte as v
-// Also accepts object payloads with r/s/v/yParity/signature/result/data.
 // --------------------
 function isHexOnly(s: any) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -398,29 +428,29 @@ function extractHexSigFromAny(raw: any): string {
     if (raw.result) return extractHexSigFromAny(raw.result);
     if (raw.data) return extractHexSigFromAny(raw.data);
 
-    const r = raw.r || raw.R;
-    const s = raw.s || raw.S;
-    const v = raw.v ?? raw.V;
-    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
+    const r = (raw as any).r || (raw as any).R;
+    const s = (raw as any).s || (raw as any).S;
+    const v = (raw as any).v ?? (raw as any).V;
+    const yParity = (raw as any).yParity ?? (raw as any).y_parity ?? (raw as any).parity;
 
     if (r && s && (v != null || yParity != null)) {
       const vNum = v != null ? normalizeV(Number(v)) : undefined;
 
-// yParity must be 0 or 1
-const yParityNum =
-  yParity != null
-    ? Number(yParity)
-    : vNum != null
-      ? (vNum === 28 ? 1 : 0)
-      : 0;
+      // yParity must be 0 or 1
+      const yParityNum =
+        yParity != null
+          ? Number(yParity)
+          : vNum != null
+            ? (vNum === 28 ? 1 : 0)
+            : 0;
 
-// viem expects v as bigint (when provided)
-const hex = signatureToHex({
-  r: r as `0x${string}`,
-  s: s as `0x${string}`,
-  yParity: yParityNum,
-  ...(vNum != null ? { v: BigInt(vNum) } : {}),
-});
+      // viem expects v as bigint (when provided)
+      const hex = signatureToHex({
+        r: r as `0x${string}`,
+        s: s as `0x${string}`,
+        yParity: yParityNum,
+        ...(vNum != null ? { v: BigInt(vNum) } : {}),
+      });
 
       return extractHexSigFromAny(hex);
     }
@@ -838,9 +868,11 @@ app.get("/health", async (_req, res) => {
   });
 });
 
-// FEED endpoints
+// FEED endpoints (public; still rate-limited lightly)
 app.get("/feed/activity", async (req, res) => {
   try {
+    if (!hit(rateKey(req, "feed_activity"), 60, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+
     const limit = Math.max(1, Math.min(100, Number(req.query.limit || FEED_LIMIT_DEFAULT)));
     if (!supabase) return sendJson(res, { ok: false, error: "Supabase not configured" }, 400);
 
@@ -871,6 +903,8 @@ app.get("/feed/activity", async (req, res) => {
 
 app.get("/feed/holders", async (req, res) => {
   try {
+    if (!hit(rateKey(req, "feed_holders"), 40, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || HOLDERS_LIMIT_DEFAULT)));
     if (!supabase) return sendJson(res, { ok: false, error: "Supabase not configured" }, 400);
 
@@ -897,30 +931,33 @@ app.get("/feed/holders", async (req, res) => {
   }
 });
 
-// Manual sync trigger
-app.post("/admin/sync-now", async (req, res) => {
+// Manual sync trigger (protected)
+app.post("/admin/sync-now", requireAllowedOrigin, async (req, res) => {
   try {
     if (!ENABLE_CHAIN_SYNC) return sendJson(res, { ok: false, error: "sync_disabled" }, 400);
 
-    if (ADMIN_KEY) {
-      const key = String(req.headers["x-admin-key"] || "").trim();
-      if (!key || key !== ADMIN_KEY) return sendJson(res, { ok: false, error: "unauthorized" }, 401);
-    }
+    // If no ADMIN_KEY, hide endpoint
+    if (!ADMIN_KEY) return sendJson(res, { ok: false, error: "not_found" }, 404);
+
+    // Rate-limit admin calls
+    if (!hit(rateKey(req, "admin_sync"), 10, 60_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+
+    const key = String(req.headers["x-admin-key"] || "").trim();
+    if (!key || key !== ADMIN_KEY) return sendJson(res, { ok: false, error: "unauthorized" }, 401);
 
     const r = await syncFromChain({ lookbackBlocks: SYNC_LOOKBACK_BLOCKS });
-    return sendJson(res, r, r.ok ? 200 : 400);
+    return sendJson(res, r, (r as any).ok ? 200 : 400);
   } catch (e: any) {
     return sendJson(res, { ok: false, error: e?.shortMessage || e?.message || "sync failed" }, 400);
   }
 });
 
 // --------------------
-// relay endpoints
+// relay endpoints (protected + strict)
 // --------------------
-app.post("/relay/nickname", async (req, res) => {
+app.post("/relay/nickname", requireAllowedOrigin, async (req, res) => {
   try {
-    const ip = getIp(req);
-    if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_nickname"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     if (!NICKNAME_REGISTRY_ADDRESS || !isAddress(NICKNAME_REGISTRY_ADDRESS)) {
       throw new Error("Relayer missing/invalid NICKNAME_REGISTRY_ADDRESS");
@@ -930,8 +967,8 @@ app.post("/relay/nickname", async (req, res) => {
     const rawIn = req.body && typeof req.body === "object" ? req.body : {};
     const merged = {
       ...rawIn,
-      user: rawIn.user ?? rawIn.wallet,
-      nick: rawIn.nick ?? rawIn.nickname,
+      user: (rawIn as any).user ?? (rawIn as any).wallet,
+      nick: (rawIn as any).nick ?? (rawIn as any).nickname,
     };
 
     const body = NicknameSchema.parse(merged);
@@ -959,11 +996,9 @@ app.post("/relay/nickname", async (req, res) => {
   }
 });
 
-
-app.post("/relay/buy", async (req, res) => {
+app.post("/relay/buy", requireAllowedOrigin, async (req, res) => {
   try {
-    const ip = getIp(req);
-    if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_buy"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const body = BuySchema.parse(req.body);
 
@@ -994,10 +1029,9 @@ app.post("/relay/buy", async (req, res) => {
   }
 });
 
-app.post("/relay/buy-permit", async (req, res) => {
+app.post("/relay/buy-permit", requireAllowedOrigin, async (req, res) => {
   try {
-    const ip = getIp(req);
-    if (!hit(ip, 25, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_buy_permit"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const body = BuyPermitSchema.parse(req.body);
 
@@ -1050,6 +1084,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`BlockSwap: ${BLOCKSWAP_ADDRESS}`);
   console.log(`NicknameRegistry: ${NICKNAME_REGISTRY_ADDRESS || "(unset)"}`);
   console.log(`CORS allowlist: ${Array.from(allowlist).join(", ")}`);
+  console.log(`ALLOW_VERCEL_PREVIEWS: ${ALLOW_VERCEL_PREVIEWS ? "ON" : "OFF"}`);
   console.log(`Supabase: ${hasSupabase() ? "ON" : "OFF"}`);
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);

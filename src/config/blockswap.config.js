@@ -9,8 +9,20 @@ function num(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-const CHAIN_ID = num(ENV.VITE_CHAIN_ID, 84532);
+// ✅ SAFETY: default to Base MAINNET if env is missing/mis-set
+// This prevents silent fallback to Sepolia (84532) in production builds.
+const CHAIN_ID = num(ENV.VITE_CHAIN_ID, 8453);
+
+// Only Base mainnet (8453) and Base Sepolia (84532) are supported in BlockSwap config.
 const IS_MAINNET = CHAIN_ID === 8453;
+const IS_SEPOLIA = CHAIN_ID === 84532;
+
+if (!IS_MAINNET && !IS_SEPOLIA) {
+  // Fail fast (especially helpful for avoiding “B3 accidentally set” breaking BlockSwap)
+  throw new Error(
+    `[BlockSwap] Unsupported VITE_CHAIN_ID=${CHAIN_ID}. BlockSwap supports 8453 (Base mainnet) or 84532 (Base Sepolia).`
+  );
+}
 
 // Prefer explicit RPC per network, then fallback to VITE_RPC_URL
 const RPC_FROM_ENV = (
@@ -21,9 +33,10 @@ const RPC_FROM_ENV = (
 
 function mustRpc() {
   if (!RPC_FROM_ENV) {
+    // Warn in dev only (keep prod console clean)
     if (ENV.MODE !== "production") {
       console.warn(
-        "[BlockSwap] Missing RPC URL. Set VITE_BASE_MAINNET_RPC (or VITE_BASE_SEPOLIA_RPC) or VITE_RPC_URL in theblock-ui/.env.local and restart `npm run dev`."
+        "[BlockSwap] Missing RPC URL. Set VITE_BASE_MAINNET_RPC (mainnet) or VITE_BASE_SEPOLIA_RPC (testnet) or VITE_RPC_URL in theblock-ui/.env.local and restart `npm run dev`."
       );
     }
   }
@@ -71,18 +84,19 @@ export const BLOCKSWAP_CONFIG = {
   RPC_URL: mustRpc(),
 
   // ✅ Addresses are FALLBACK ONLY.
-  // The adapter will prefer /public/deployments.baseMainnet.json on mainnet
-  // and /public/deployments.baseSepolia.json on testnet.
-  USDC_ADDRESS: ENV.VITE_USDC_ADDRESS || "0x0000000000000000000000000000000000000000",
-  OZ_ADDRESS: ENV.VITE_OZ_ADDRESS || "0x0000000000000000000000000000000000000000",
-  BLOCKSWAP_ADDRESS:
-    ENV.VITE_BLOCKSWAP_ADDRESS || "0x0000000000000000000000000000000000000000",
+  // Your adapters/pages prefer deployments JSON in /public:
+  //  - mainnet: /deployments.base.json
+  //  - testnet: /deployments.baseSepolia.json
+  // If that file is stale, you'll hit old contracts / mismatched ABIs.
+  USDC_ADDRESS: (ENV.VITE_USDC_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
+  OZ_ADDRESS: (ENV.VITE_OZ_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
+  BLOCKSWAP_ADDRESS: (ENV.VITE_BLOCKSWAP_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
 
   // Rewards (Merkle)
+  // Prefer deployments file if you are writing it (recommended).
+  // Only set env override if you intentionally want to bypass deployments.
   REWARDS_ADDRESS:
-    ENV.VITE_REWARDS_ADDRESS ||
-    ENV.VITE_REWARDS_MERKLE_ADDRESS ||
-    "0x0000000000000000000000000000000000000000",
+    (ENV.VITE_REWARDS_ADDRESS || ENV.VITE_REWARDS_MERKLE_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
   REWARDS_ROUND_ID: Number(ENV.VITE_REWARDS_ROUND_ID || 1),
-  REWARDS_PROOFS_URL: ENV.VITE_REWARDS_PROOFS_URL || "/rewards/round1.proofs.json",
+  REWARDS_PROOFS_URL: (ENV.VITE_REWARDS_PROOFS_URL || "/rewards/round1.proofs.json").trim(),
 };
