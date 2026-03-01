@@ -10,6 +10,7 @@ import {
   encodeAbiParameters,
   parseAbiParameters,
   toBytes,
+  getAddress,
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -43,7 +44,6 @@ function looksLikeAlchemyMissingKey(url) {
 function resolveRpcUrl() {
   const chain = chainFromConfig();
 
-  // ✅ parity with blockswapAdapter (mainnet + sepolia env support)
   const rpc =
     sanitizeUrl(C.RPC_URL) ||
     sanitizeUrl(import.meta.env.VITE_RPC_URL) ||
@@ -53,10 +53,6 @@ function resolveRpcUrl() {
     chain?.rpcUrls?.public?.http?.[0];
 
   if (!rpc) throw new Error("Missing RPC URL. Set VITE_RPC_URL.");
-  if (looksLikeAlchemyMissingKey(rpc)) {
-    // not fatal, but helps catch “alchemy.com/v2/” missing key mistakes
-    dlog("RPC looks like missing Alchemy key; verify env:", rpc);
-  }
   return rpc;
 }
 
@@ -98,6 +94,16 @@ function toChainId(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function mustAddr(label, v) {
+  const s = String(v || "").trim();
+  try {
+    return getAddress(s);
+  } catch {
+    if (!isAddress(s)) throw new Error(`Bad ${label} address: ${v}`);
+    throw new Error(`Bad ${label} address (checksum): ${v}`);
+  }
+}
+
 // --- minimal NicknameRegistryRelayed ABI ---
 const NICK_ABI = [
   {
@@ -127,18 +133,22 @@ const NICK_DIRECT_ABI = [
   },
 ];
 
+// ✅ Align with BlockSwap adapter deployments naming
+const DEPLOYMENTS_URL =
+  Number(C.CHAIN_ID) === 8453 ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
+
 async function resolveRegistryAddress() {
+  // 1) explicit env wins
   const addr = sanitizeUrl(import.meta.env.VITE_NICKNAME_REGISTRY_ADDRESS);
-  if (addr && isAddress(addr)) return addr;
+  if (addr && isAddress(addr)) return mustAddr("NicknameRegistry", addr);
 
-  // ✅ match your UI deployments names
-  const url = Number(C.CHAIN_ID) === 8453 ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
-
+  // 2) deployments file fallback
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(DEPLOYMENTS_URL, { cache: "no-store" });
     if (res.ok) {
       const d = await res.json();
       const dj = d?.contracts ? d.contracts : d;
+
       const fromJson =
         dj?.NicknameRegistryRelayed ||
         dj?.NicknameRegistry ||
@@ -146,12 +156,13 @@ async function resolveRegistryAddress() {
         dj?.nicknameRegistry ||
         null;
 
-      if (fromJson && isAddress(fromJson)) return fromJson;
+      if (fromJson && isAddress(fromJson)) return mustAddr("NicknameRegistry", fromJson);
     }
   } catch {}
 
   throw new Error(
-    "Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS (local .env.local + Vercel env)."
+    "Missing Nickname Registry address. Set VITE_NICKNAME_REGISTRY_ADDRESS (local .env.local + Vercel env) " +
+      `or ensure ${DEPLOYMENTS_URL} contains NicknameRegistryRelayed.`
   );
 }
 
@@ -289,9 +300,11 @@ function normalizeSigTo65(sigLike) {
   throw new Error(`Signature invalid length (${len}).`);
 }
 
+// Always return a signature HEX STRING or throw
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
+  // wake wallet / ensure account is authorized (helps MetaMask Mobile)
   try {
     await withTimeout(
       provider.request({ method: "eth_requestAccounts", params: [] }),
@@ -302,13 +315,14 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     lastErr = e;
   }
 
+  // preferred: viem signMessage raw bytes32
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     const sig = await withTimeout(
       wc.signMessage({ account, message: { raw: msgHash } }),
       45_000,
       isProbablyMobile()
-        ? "Signature request timed out (mobile). Open the dapp inside your wallet browser or use WalletConnect, then try again."
+        ? "Signature request timed out (mobile). Open the dapp inside MetaMask Browser or use WalletConnect, then try again."
         : "Signature request timed out. Check your wallet popup and try again."
     );
     return extractHexSigFromAny(sig);
@@ -316,11 +330,14 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     lastErr = e;
   }
 
+  // fallback: personal_sign (order varies)
   try {
     const sig = await withTimeout(
       provider.request({ method: "personal_sign", params: [msgHash, account] }),
       45_000,
-      isProbablyMobile() ? "personal_sign timed out (mobile)." : "personal_sign timed out."
+      isProbablyMobile()
+        ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+        : "personal_sign timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e1) {
@@ -329,7 +346,9 @@ async function signRawHash({ provider, chain, account, msgHash }) {
       const sig = await withTimeout(
         provider.request({ method: "personal_sign", params: [account, msgHash] }),
         45_000,
-        isProbablyMobile() ? "personal_sign timed out (mobile)." : "personal_sign timed out."
+        isProbablyMobile()
+          ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+          : "personal_sign timed out."
       );
       return extractHexSigFromAny(sig);
     } catch (e2) {
@@ -337,27 +356,30 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     }
   }
 
+  // fallback: eth_sign
   try {
     const sig = await withTimeout(
       provider.request({ method: "eth_sign", params: [account, msgHash] }),
       45_000,
-      isProbablyMobile() ? "eth_sign timed out (mobile)." : "eth_sign timed out."
+      isProbablyMobile()
+        ? "eth_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
+        : "eth_sign timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e3) {
     lastErr = e3;
   }
 
-  const baseMsg = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
+  const base = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
 
   if (isProbablyMobile()) {
     throw new Error(
-      `${baseMsg}\n\nMobile tip: if you opened the dapp in Chrome/Safari and it kicked you into a wallet app, the confirm can fail to appear.\n` +
-        `Fix: open the dapp inside the wallet’s in-app browser, or connect via WalletConnect.`
+      `${base}\n\nMobile tip: If you opened the dapp in Chrome/Safari and it kicked you into MetaMask, the confirm can fail to appear.\n` +
+        `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
     );
   }
 
-  throw new Error(baseMsg);
+  throw new Error(base);
 }
 
 export async function getNickname(walletAddress) {
@@ -382,6 +404,10 @@ export async function getNickname(walletAddress) {
   return String(name || "");
 }
 
+/**
+ * ✅ PREPARE gasless nickname:
+ * Do RPC reads BEFORE the user taps “Save Name”.
+ */
 export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
@@ -411,7 +437,9 @@ export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provide
 
   if (Number(walletChainId) !== Number(rpcChainId)) {
     throw new Error(
-      `Wrong network in wallet.\nWallet chainId=${walletChainId}, expected=${rpcChainId}.\nFix: switch networks.`
+      `Wrong network in wallet.\n` +
+        `Wallet chainId=${walletChainId}, expected=${rpcChainId}.\n` +
+        `Fix: switch your wallet network to match BlockSwap (target chainId=${rpcChainId}).`
     );
   }
 
@@ -452,6 +480,10 @@ export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provide
   };
 }
 
+/**
+ * Gasless nickname (relayer pays gas)
+ * If `prepared` is provided, we skip all pre-work and go straight to signing.
+ */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, prepared) {
   const relayerUrl = resolveRelayerUrl();
   if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL (local .env.local + Vercel env).");
@@ -463,7 +495,6 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
   if (!provider?.request) throw new Error("No wallet provider available for signing (EIP-1193 missing).");
 
   const chain = chainFromConfig();
-
   const prep = prepared || (await prepareNicknameRelayed(nick, walletAddress, provider));
   const trimmed = String(prep?.nick || "").trim();
 
@@ -516,6 +547,9 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
   return j;
 }
 
+/**
+ * Direct on-chain nickname write (only if you flip VITE_ALLOW_DIRECT_NICKNAME=1)
+ */
 export async function setNicknameDirect(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
