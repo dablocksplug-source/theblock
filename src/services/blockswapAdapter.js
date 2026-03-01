@@ -439,17 +439,37 @@ function assertSig(label, sigLike) {
   return full;
 }
 
+// ✅ IMPORTANT: Coinbase/Base Wallet commonly blocks eth_sign.
+// So: prefer personal_sign first, only then fallback to viem signMessage.
+// (No eth_sign in this build.)
 async function signRawHash({ provider, chain, account, msgHash }) {
+  let lastErr = null;
+
+  // Try personal_sign (most compatible)
+  try {
+    return await provider.request({ method: "personal_sign", params: [msgHash, account] });
+  } catch (e1) {
+    lastErr = e1;
+    try {
+      return await provider.request({ method: "personal_sign", params: [account, msgHash] });
+    } catch (e2) {
+      lastErr = e2;
+    }
+  }
+
+  // Fallback: viem signMessage (may map to eth_sign on some wallets)
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     return await wc.signMessage({ account, message: { raw: msgHash } });
-  } catch {
-    try {
-      return await provider.request({ method: "personal_sign", params: [msgHash, account] });
-    } catch {
-      return await provider.request({ method: "personal_sign", params: [account, msgHash] });
-    }
+  } catch (e3) {
+    lastErr = e3;
   }
+
+  const msg = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
+  throw new Error(
+    `${msg}\n\nWallet note: Coinbase/Base Wallet often blocks eth_sign.\n` +
+      `Fix: open the dapp inside the wallet browser (or use WalletConnect) and try again.`
+  );
 }
 
 // -------------------------------
@@ -966,12 +986,13 @@ export const blockswapAdapter = {
     const eip1193 = mustProvider();
     const wc = this._walletClient();
 
-    let rawBuySig;
-    try {
-      rawBuySig = await wc.signMessage({ account: walletAddress, message: { raw: msgHash } });
-    } catch {
-      rawBuySig = await signRawHash({ provider: eip1193, chain, account: walletAddress, msgHash });
-    }
+    // ✅ Coinbase/Base Wallet: do NOT try wc.signMessage first (can map to eth_sign)
+    const rawBuySig = await signRawHash({
+      provider: eip1193,
+      chain,
+      account: walletAddress,
+      msgHash,
+    });
 
     const forced = (import.meta.env?.VITE_USDC_PERMIT_VERSION || "").trim();
     const domain = {

@@ -36,11 +36,6 @@ function chainFromConfig() {
   return Number(C.CHAIN_ID) === base.id ? base : baseSepolia;
 }
 
-function looksLikeAlchemyMissingKey(url) {
-  const u = sanitizeUrl(url);
-  return !!u && /alchemy\.com\/v2\/?$/.test(u);
-}
-
 function resolveRpcUrl() {
   const chain = chainFromConfig();
 
@@ -248,7 +243,7 @@ function expandEip2098(sig64_hex) {
   const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
-  const v = (vsFirstByte & 0x80) ? 28 : 27;
+  const v = vsFirstByte & 0x80 ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
   const sFixed = sFirstByte + vs.slice(2);
@@ -300,44 +295,30 @@ function normalizeSigTo65(sigLike) {
   throw new Error(`Signature invalid length (${len}).`);
 }
 
-// Always return a signature HEX STRING or throw
+// ✅ IMPORTANT: Coinbase/Base Wallet commonly blocks eth_sign.
+// Prefer personal_sign first; no eth_sign fallback.
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
-  // wake wallet / ensure account is authorized (helps MetaMask Mobile)
+  // wake wallet / ensure account is authorized (helps mobile)
   try {
     await withTimeout(
       provider.request({ method: "eth_requestAccounts", params: [] }),
-      15_000,
-      "Wallet did not respond to eth_requestAccounts (timeout). Open your wallet app and try again."
+      12_000,
+      "Wallet did not respond. Open your wallet app and try again."
     );
   } catch (e) {
     lastErr = e;
   }
 
-  // preferred: viem signMessage raw bytes32
-  try {
-    const wc = createWalletClient({ chain, transport: custom(provider) });
-    const sig = await withTimeout(
-      wc.signMessage({ account, message: { raw: msgHash } }),
-      45_000,
-      isProbablyMobile()
-        ? "Signature request timed out (mobile). Open the dapp inside MetaMask Browser or use WalletConnect, then try again."
-        : "Signature request timed out. Check your wallet popup and try again."
-    );
-    return extractHexSigFromAny(sig);
-  } catch (e) {
-    lastErr = e;
-  }
-
-  // fallback: personal_sign (order varies)
+  // preferred: personal_sign (both param orders)
   try {
     const sig = await withTimeout(
       provider.request({ method: "personal_sign", params: [msgHash, account] }),
       45_000,
       isProbablyMobile()
-        ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-        : "personal_sign timed out."
+        ? "Signature timed out (mobile). Open the dapp inside your wallet browser and try again."
+        : "Signature timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e1) {
@@ -347,8 +328,8 @@ async function signRawHash({ provider, chain, account, msgHash }) {
         provider.request({ method: "personal_sign", params: [account, msgHash] }),
         45_000,
         isProbablyMobile()
-          ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-          : "personal_sign timed out."
+          ? "Signature timed out (mobile). Open the dapp inside your wallet browser and try again."
+          : "Signature timed out."
       );
       return extractHexSigFromAny(sig);
     } catch (e2) {
@@ -356,14 +337,15 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     }
   }
 
-  // fallback: eth_sign
+  // fallback: viem signMessage (only after personal_sign)
   try {
+    const wc = createWalletClient({ chain, transport: custom(provider) });
     const sig = await withTimeout(
-      provider.request({ method: "eth_sign", params: [account, msgHash] }),
+      wc.signMessage({ account, message: { raw: msgHash } }),
       45_000,
       isProbablyMobile()
-        ? "eth_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-        : "eth_sign timed out."
+        ? "Signature timed out (mobile). Open the dapp inside your wallet browser and try again."
+        : "Signature timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e3) {
@@ -372,14 +354,10 @@ async function signRawHash({ provider, chain, account, msgHash }) {
 
   const base = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
 
-  if (isProbablyMobile()) {
-    throw new Error(
-      `${base}\n\nMobile tip: If you opened the dapp in Chrome/Safari and it kicked you into MetaMask, the confirm can fail to appear.\n` +
-        `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
-    );
-  }
-
-  throw new Error(base);
+  throw new Error(
+    `${base}\n\nCoinbase/Base Wallet note: eth_sign is commonly blocked.\n` +
+      `Fix: use the wallet’s in-app browser or WalletConnect.`
+  );
 }
 
 export async function getNickname(walletAddress) {
