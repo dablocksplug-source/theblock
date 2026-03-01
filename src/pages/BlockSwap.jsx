@@ -216,6 +216,30 @@ function formatUnitsPretty(value, decimals, maxFrac) {
   return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
 }
 
+// -------- chainId helpers (provider-truth) --------
+function toChainId(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return 0;
+  if (s.startsWith("0x")) {
+    const n = parseInt(s, 16);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function readProviderChainId(provider) {
+  try {
+    if (!provider || typeof provider.request !== "function") return 0;
+    const hex = await provider.request({ method: "eth_chainId" });
+    return toChainId(hex);
+  } catch {
+    return 0;
+  }
+}
+
 export default function BlockSwap() {
   const {
     walletAddress,
@@ -224,7 +248,7 @@ export default function BlockSwap() {
     // keep wagmi chainId for debug only
     chainId,
 
-    // ✅ USE THIS for all gating (provider truth)
+    // ✅ USE THIS for all gating (provider truth… but we’ll also verify via provider.request)
     effectiveChainId,
 
     ensureChain,
@@ -283,6 +307,31 @@ export default function BlockSwap() {
   const FEED_LIMIT = 15;
   const FEED_POLL_MS = 90_000;
   const HOLDERS_LIMIT = 250;
+
+  // ✅ provider-truth (extra) — fixes Trust/Coinbase “still says wrong chain” when wagmi/effective get stale
+  const [providerChainId, setProviderChainId] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refresh() {
+      const cid = await readProviderChainId(provider);
+      if (!cancelled) setProviderChainId(Number(cid || 0));
+    }
+
+    // refresh immediately + a few times (mobile wallets sometimes lag on first connect)
+    refresh().catch(() => {});
+    const t1 = setTimeout(() => refresh().catch(() => {}), 400);
+    const t2 = setTimeout(() => refresh().catch(() => {}), 1200);
+    const t3 = setTimeout(() => refresh().catch(() => {}), 2400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [provider, isConnected, walletAddress]);
 
   // -----------------------------
   // Rewards / Merkle claim state
@@ -364,32 +413,38 @@ export default function BlockSwap() {
     } catch {}
   }
 
-  // ✅ confirm chain via ACTIVE connector provider (works for WalletConnect too)
-  async function getProviderChainIdFallback() {
-    try {
-      const p = provider;
-      if (!p || typeof p.request !== "function") return Number(effectiveChainId || chainId || 0);
-      const hex = await p.request({ method: "eth_chainId" });
-      const n = parseInt(String(hex || "0"), 16);
-      return Number.isFinite(n) ? n : Number(effectiveChainId || chainId || 0);
-    } catch {
-      return Number(effectiveChainId || chainId || 0);
-    }
-  }
+  // ✅ single source of “current chain” for this page
+  const currentChainId = useMemo(() => {
+    return Number(providerChainId || effectiveChainId || chainId || 0);
+  }, [providerChainId, effectiveChainId, chainId]);
 
   async function ensureTargetChainOrThrow() {
     const TARGET = Number(C.CHAIN_ID || 0);
     if (!TARGET) return;
 
+    // if already correct, quick exit
+    if (Number(currentChainId || 0) === TARGET) return;
+
+    // try switching
     if (ensureChain) {
       await ensureChain(TARGET);
     }
 
-    // Re-check using provider truth
-    const cid = await getProviderChainIdFallback();
-    if (cid && cid !== TARGET) {
-      throw new Error(`Wrong network. Switch to chain ${TARGET}.`);
+    // re-check using provider truth (strongest)
+    const cid = (await readProviderChainId(provider)) || Number(effectiveChainId || chainId || 0);
+
+    if (cid && Number(cid) === TARGET) {
+      setProviderChainId(Number(cid));
+      return;
     }
+
+    // if still unknown, fail loudly (this is the exact bug you’re seeing on some wallets)
+    throw new Error(
+      `Wrong network.\n` +
+        `Expected chainId=${TARGET}\n` +
+        `Wallet chainId=${cid || "unknown"}\n` +
+        `Tip: on mobile, open the dapp inside the wallet browser and switch to Base (8453).`
+    );
   }
 
   useEffect(() => {
@@ -445,9 +500,7 @@ export default function BlockSwap() {
 
   const isAdmin = useMemo(() => {
     if (!walletAddress) return false;
-    return (
-      String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET || "").toLowerCase()
-    );
+    return String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET || "").toLowerCase();
   }, [walletAddress]);
 
   const STABLE = C.STABLE_SYMBOL || "USDC";
@@ -471,13 +524,15 @@ export default function BlockSwap() {
   const buyCost = useMemo(() => buyTotalOz * buyPriceOz, [buyTotalOz, buyPriceOz]);
   const sellProceeds = useMemo(() => sellTotalOz * sellFloorOz, [sellTotalOz, sellFloorOz]);
 
-  // ✅ provider-truth gating
-  const chainReady = Number(effectiveChainId || 0) > 0 || Number(chainId || 0) > 0;
+  // ✅ provider-truth gating (NOW includes providerChainId)
+  const chainReady =
+    Number(providerChainId || 0) > 0 || Number(effectiveChainId || 0) > 0 || Number(chainId || 0) > 0;
+
   const wrongChain =
     isConnected &&
     Number(TARGET_CHAIN_ID) > 0 &&
     chainReady &&
-    Number(effectiveChainId || chainId || 0) !== Number(TARGET_CHAIN_ID);
+    Number(currentChainId || 0) !== Number(TARGET_CHAIN_ID);
 
   const canBuy =
     isConnected && !wrongChain && !snap?.buyPaused && buyTotalOz > 0 && !!RELAYER_URL;
@@ -501,11 +556,9 @@ export default function BlockSwap() {
         .from("profiles")
         .upsert(payload, { onConflict: "chain_id,address" });
 
-      if (error && DEBUG_LOGS)
-        console.warn("Supabase upsert profile error:", error?.message || error);
+      if (error && DEBUG_LOGS) console.warn("Supabase upsert profile error:", error?.message || error);
     } catch (e) {
-      if (DEBUG_LOGS)
-        console.warn("Supabase upsert profile exception:", e?.message || e);
+      if (DEBUG_LOGS) console.warn("Supabase upsert profile exception:", e?.message || e);
     }
   }
 
@@ -528,8 +581,7 @@ export default function BlockSwap() {
         .in("address", batch);
 
       if (error) {
-        if (DEBUG_LOGS)
-          console.warn("Supabase fetch profiles error:", error?.message || error);
+        if (DEBUG_LOGS) console.warn("Supabase fetch profiles error:", error?.message || error);
         continue;
       }
 
@@ -561,9 +613,7 @@ export default function BlockSwap() {
       const s = await blockswapAdapter.getSwapSnapshot();
       if (mountedRef.current) setSnap(s || null);
     } catch (e) {
-      if (mountedRef.current) {
-        setErr(e?.shortMessage || e?.message || "Failed to load BlockSwap.");
-      }
+      if (mountedRef.current) setErr(e?.shortMessage || e?.message || "Failed to load BlockSwap.");
     } finally {
       if (!silent && mountedRef.current) setLoading(false);
       refreshingRef.current = false;
@@ -702,8 +752,7 @@ export default function BlockSwap() {
       const entries = Array.isArray(proofs?.entries) ? proofs.entries : [];
 
       const target = String(walletAddress).toLowerCase();
-      const mine =
-        entries.find((e) => String(e?.wallet || "").toLowerCase() === target) || null;
+      const mine = entries.find((e) => String(e?.wallet || "").toLowerCase() === target) || null;
       if (mountedRef.current) setMyRewardsEntry(mine);
 
       const abi = MERKLE_ABI || MERKLE_MIN_ABI;
@@ -864,13 +913,11 @@ export default function BlockSwap() {
 
   const vault = snap?.fmt?.vault ?? snap?.fmt?.swapUsdc ?? "—";
   const treasury =
-    snap?.fmt?.treasuryUsdc ??
-    snap?.fmt?.treasuryUSDC ??
-    snap?.fmt?.treasury ??
-    "—";
+    snap?.fmt?.treasuryUsdc ?? snap?.fmt?.treasuryUSDC ?? snap?.fmt?.treasury ?? "—";
 
   const swapOzInvRaw = snap?.fmt?.ozInventory ?? snap?.fmt?.swapOz ?? "—";
-  const swapOzInvPretty = swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
+  const swapOzInvPretty =
+    swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
 
   const inventoryLooksSuspicious =
     String(swapOzInvRaw) !== "—" && Number(swapOzInvRaw) === 0 && snap?.sellPricePerBrick;
@@ -995,7 +1042,9 @@ export default function BlockSwap() {
               <span
                 className={
                   "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
-                  (snap?.buyPaused ? "bg-rose-500/15 text-rose-200" : "bg-emerald-500/15 text-emerald-200")
+                  (snap?.buyPaused
+                    ? "bg-rose-500/15 text-rose-200"
+                    : "bg-emerald-500/15 text-emerald-200")
                 }
                 title="Buys can be paused by admin"
               >
@@ -1005,7 +1054,9 @@ export default function BlockSwap() {
               <span
                 className={
                   "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
-                  (RELAYER_URL ? "bg-emerald-500/15 text-emerald-200" : "bg-rose-500/15 text-rose-200")
+                  (RELAYER_URL
+                    ? "bg-emerald-500/15 text-emerald-200"
+                    : "bg-rose-500/15 text-rose-200")
                 }
                 title={RELAYER_URL ? "Relayer enabled (gasless buy + feed)" : "Relayer missing"}
               >
@@ -1062,13 +1113,15 @@ export default function BlockSwap() {
                 </span>
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-500">
-                  Target ChainId: <span className="text-slate-300">{TARGET_CHAIN_ID || "—"}</span>
+                  Target ChainId:{" "}
+                  <span className="text-slate-300">{TARGET_CHAIN_ID || "—"}</span>
                 </span>
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-500">
-                  Wallet chain (wagmi/provider):{" "}
+                  Wallet chain (wagmi/effective/provider/current):{" "}
                   <span className="text-slate-300">
-                    {Number(chainId || 0) || "—"} / {Number(effectiveChainId || 0) || "—"}
+                    {Number(chainId || 0) || "—"} / {Number(effectiveChainId || 0) || "—"} /{" "}
+                    {Number(providerChainId || 0) || "—"} / {Number(currentChainId || 0) || "—"}
                   </span>
                 </span>
                 <span className="text-slate-600">•</span>
@@ -1083,7 +1136,8 @@ export default function BlockSwap() {
               <div className="text-slate-500">
                 {RELAYER_URL ? (
                   <>
-                    Activity refresh ~<span className="font-mono">{Math.round(FEED_POLL_MS / 1000)}</span>s
+                    Activity refresh ~
+                    <span className="font-mono">{Math.round(FEED_POLL_MS / 1000)}</span>s
                   </>
                 ) : (
                   <>Relayer not configured</>
@@ -1127,7 +1181,9 @@ export default function BlockSwap() {
         {showContracts ? (
           <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Contracts</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Contracts
+              </div>
             </div>
 
             <div className="mt-3 grid gap-2 md:grid-cols-3">
@@ -1138,20 +1194,24 @@ export default function BlockSwap() {
 
             {!RELAYER_URL ? (
               <div className="mt-3 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-                Gasless buys + activity feed are OFF because <span className="font-mono">VITE_RELAYER_URL</span> is missing.
+                Gasless buys + activity feed are OFF because{" "}
+                <span className="font-mono">VITE_RELAYER_URL</span> is missing.
               </div>
             ) : null}
 
             {inventoryLooksSuspicious ? (
               <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
-                OZ inventory reads <span className="font-mono">0</span> but pricing loaded. If RPC is flaky, balances can fail to load.
+                OZ inventory reads <span className="font-mono">0</span> but pricing loaded. If
+                RPC is flaky, balances can fail to load.
               </div>
             ) : null}
 
             {!supabase ? (
               <div className="mt-3 text-[0.75rem] text-slate-500">
-                Nicknames are optional. Add <span className="font-mono">VITE_SUPABASE_URL</span> and{" "}
-                <span className="font-mono">VITE_SUPABASE_ANON_KEY</span> to <span className="font-mono">.env.local</span> to display names in the holders list.
+                Nicknames are optional. Add <span className="font-mono">VITE_SUPABASE_URL</span>{" "}
+                and <span className="font-mono">VITE_SUPABASE_ANON_KEY</span> to{" "}
+                <span className="font-mono">.env.local</span> to display names in the holders
+                list.
               </div>
             ) : (
               <div className="mt-3 text-[0.75rem] text-slate-500">
@@ -1165,14 +1225,17 @@ export default function BlockSwap() {
         {isAdmin ? (
           <details className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
             <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">
-              Admin controls <span className="ml-2 text-xs font-normal text-slate-500">(only visible to admin wallet)</span>
+              Admin controls{" "}
+              <span className="ml-2 text-xs font-normal text-slate-500">
+                (only visible to admin wallet)
+              </span>
             </summary>
 
             <div className="mt-4">
               <BlockSwapAdminPanel
                 walletAddress={walletAddress}
                 adminWallet={C.ADMIN_WALLET}
-                chainId={Number(effectiveChainId || chainId || 0)}
+                chainId={Number(currentChainId || 0)}
                 targetChainId={TARGET_CHAIN_ID}
                 ensureChain={ensureChain}
                 stableSymbol={STABLE}
@@ -1190,7 +1253,9 @@ export default function BlockSwap() {
           {/* Left */}
           <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Trade</h2>
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+                Trade
+              </h2>
               <span className="text-xs text-slate-400">1 brick = {ozPerBrick} oz</span>
             </div>
 
@@ -1198,11 +1263,15 @@ export default function BlockSwap() {
               {/* BUY */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Buy (Gasless)</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Buy (Gasless)
+                  </div>
                   <span
                     className={
                       "rounded-full px-2 py-0.5 text-[10px] font-semibold " +
-                      (snap?.buyPaused ? "bg-rose-500/15 text-rose-200" : "bg-emerald-500/15 text-emerald-200")
+                      (snap?.buyPaused
+                        ? "bg-rose-500/15 text-rose-200"
+                        : "bg-emerald-500/15 text-emerald-200")
                     }
                   >
                     {snap?.buyPaused ? "PAUSED" : "LIVE"}
@@ -1234,7 +1303,11 @@ export default function BlockSwap() {
                       inputMode="numeric"
                       value={buyBricks}
                       onChange={(e) => {
-                        const next = normalizeBricksOunces(parseInt(e.target.value || "0", 10), buyOunces, ozPerBrick);
+                        const next = normalizeBricksOunces(
+                          parseInt(e.target.value || "0", 10),
+                          buyOunces,
+                          ozPerBrick
+                        );
                         setBuyBricks(next.bricks);
                         setBuyOunces(next.ounces);
                       }}
@@ -1252,14 +1325,20 @@ export default function BlockSwap() {
                       inputMode="numeric"
                       value={buyOunces}
                       onChange={(e) => {
-                        const next = normalizeBricksOunces(buyBricks, parseInt(e.target.value || "0", 10), ozPerBrick);
+                        const next = normalizeBricksOunces(
+                          buyBricks,
+                          parseInt(e.target.value || "0", 10),
+                          ozPerBrick
+                        );
                         setBuyBricks(next.bricks);
                         setBuyOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-sky-500"
                       disabled={!!snap?.buyPaused || loading || wrongChain || !RELAYER_URL}
                     />
-                    <div className="mt-1 text-[0.65rem] text-slate-500">Auto-carries into bricks (0–{ozPerBrick - 1} shown).</div>
+                    <div className="mt-1 text-[0.65rem] text-slate-500">
+                      Auto-carries into bricks (0–{ozPerBrick - 1} shown).
+                    </div>
                   </div>
                 </div>
 
@@ -1288,14 +1367,17 @@ export default function BlockSwap() {
 
                 {!RELAYER_URL ? (
                   <div className="mt-3 text-[0.7rem] leading-relaxed text-slate-500">
-                    Gasless buy requires the relayer. (Set <span className="font-mono">VITE_RELAYER_URL</span>.)
+                    Gasless buy requires the relayer. (Set{" "}
+                    <span className="font-mono">VITE_RELAYER_URL</span>.)
                   </div>
                 ) : null}
               </div>
 
               {/* SELLBACK */}
               <div className="rounded-xl border border-emerald-500/30 bg-slate-950/60 p-4">
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-300">Sell Back (Floor)</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-300">
+                  Sell Back (Floor)
+                </div>
 
                 <div className="mb-3 space-y-1 text-xs text-slate-400">
                   <div className="flex justify-between">
@@ -1322,7 +1404,11 @@ export default function BlockSwap() {
                       inputMode="numeric"
                       value={sellBricks}
                       onChange={(e) => {
-                        const next = normalizeBricksOunces(parseInt(e.target.value || "0", 10), sellOunces, ozPerBrick);
+                        const next = normalizeBricksOunces(
+                          parseInt(e.target.value || "0", 10),
+                          sellOunces,
+                          ozPerBrick
+                        );
                         setSellBricks(next.bricks);
                         setSellOunces(next.ounces);
                       }}
@@ -1340,14 +1426,20 @@ export default function BlockSwap() {
                       inputMode="numeric"
                       value={sellOunces}
                       onChange={(e) => {
-                        const next = normalizeBricksOunces(sellBricks, parseInt(e.target.value || "0", 10), ozPerBrick);
+                        const next = normalizeBricksOunces(
+                          sellBricks,
+                          parseInt(e.target.value || "0", 10),
+                          ozPerBrick
+                        );
                         setSellBricks(next.bricks);
                         setSellOunces(next.ounces);
                       }}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-50 outline-none focus:border-emerald-500"
                       disabled={loading || wrongChain}
                     />
-                    <div className="mt-1 text-[0.65rem] text-slate-500">Auto-carries into bricks (0–{ozPerBrick - 1} shown).</div>
+                    <div className="mt-1 text-[0.65rem] text-slate-500">
+                      Auto-carries into bricks (0–{ozPerBrick - 1} shown).
+                    </div>
                   </div>
                 </div>
 
@@ -1382,10 +1474,14 @@ export default function BlockSwap() {
             {/* Street Activity */}
             <div className="mt-2 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">Street Activity</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Street Activity
+                </h3>
                 <span className="text-[0.7rem] text-slate-500">
                   Last {FEED_LIMIT} events • refresh ~{Math.round(FEED_POLL_MS / 1000)}s
-                  {lastActivityAt ? <span className="ml-2 text-slate-600">• updated {lastActivityAt}</span> : null}
+                  {lastActivityAt ? (
+                    <span className="ml-2 text-slate-600">• updated {lastActivityAt}</span>
+                  ) : null}
                 </span>
               </div>
 
@@ -1416,7 +1512,9 @@ export default function BlockSwap() {
           {/* Right */}
           <div className="space-y-4">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Proof of Funds</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+                Proof of Funds
+              </h3>
 
               <dl className="mt-4 space-y-3 text-sm">
                 <div className="flex items-start justify-between gap-4">
@@ -1436,20 +1534,26 @@ export default function BlockSwap() {
               </dl>
 
               <p className="mt-4 text-[0.75rem] leading-relaxed text-slate-500">
-                Vault is reserved for floor sell-backs. Treasury supports operations and future districts. OZ inventory is what’s available to buy.
+                Vault is reserved for floor sell-backs. Treasury supports operations and future
+                districts. OZ inventory is what’s available to buy.
               </p>
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Quick Notes</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+                Quick Notes
+              </h3>
               <ul className="mt-3 space-y-2 text-sm text-slate-300">
                 <li className="text-slate-400">
-                  • You’re buying <span className="text-slate-200">OZ</span> (shown as bricks + ounces for readability).
+                  • You’re buying <span className="text-slate-200">OZ</span> (shown as bricks +
+                  ounces for readability).
                 </li>
                 <li className="text-slate-400">
                   • Brick = <span className="font-mono text-slate-200">{ozPerBrick}</span> oz.
                 </li>
-                <li className="text-slate-400">• Sell back uses the on-chain floor price when available.</li>
+                <li className="text-slate-400">
+                  • Sell back uses the on-chain floor price when available.
+                </li>
               </ul>
             </div>
           </div>
@@ -1458,10 +1562,14 @@ export default function BlockSwap() {
         {/* Holders */}
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Holders (Net Buys − SellBacks)</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+              Holders (Net Buys − SellBacks)
+            </h2>
             <span className="text-xs text-slate-400">
               Circulating policy: {Number(circulatingOz || 0).toLocaleString()} oz
-              {lastHoldersAt ? <span className="ml-2 text-slate-600">• updated {lastHoldersAt}</span> : null}
+              {lastHoldersAt ? (
+                <span className="ml-2 text-slate-600">• updated {lastHoldersAt}</span>
+              ) : null}
             </span>
           </div>
 
@@ -1486,9 +1594,13 @@ export default function BlockSwap() {
                       </td>
                       <td className="px-3 py-2 text-right text-xs">
                         {h.isBrickHolder ? (
-                          <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200">Yes</span>
+                          <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200">
+                            Yes
+                          </span>
                         ) : (
-                          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">No</span>
+                          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300">
+                            No
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -1509,14 +1621,17 @@ export default function BlockSwap() {
           </div>
 
           <p className="mt-3 text-[0.75rem] text-slate-500">
-            This list is built from relayer-indexed BlockSwap events. Wallet-to-wallet OZ transfers won’t show here unless you later index ERC20 Transfer events.
+            This list is built from relayer-indexed BlockSwap events. Wallet-to-wallet OZ transfers
+            won’t show here unless you later index ERC20 Transfer events.
           </p>
         </section>
 
         {/* Rewards Claim */}
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">Rewards Claim (Round {rewardsRoundId})</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+              Rewards Claim (Round {rewardsRoundId})
+            </h2>
 
             <button
               type="button"
@@ -1573,11 +1688,17 @@ export default function BlockSwap() {
 
                 <div className="flex items-center justify-between gap-2 md:justify-end">
                   {myRewardsClaimed === true ? (
-                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-200">Claimed ✅</span>
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-200">
+                      Claimed ✅
+                    </span>
                   ) : myRewardsClaimed === false ? (
-                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200">Not claimed</span>
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-200">
+                      Not claimed
+                    </span>
                   ) : (
-                    <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-300">—</span>
+                    <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
+                      —
+                    </span>
                   )}
                 </div>
               </div>
@@ -1585,14 +1706,18 @@ export default function BlockSwap() {
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
                   <div className="text-[10px] uppercase text-slate-500">Eligible</div>
-                  <div className="text-sm font-semibold text-slate-200">{myRewardsEntry ? "YES" : "NO"}</div>
+                  <div className="text-sm font-semibold text-slate-200">
+                    {myRewardsEntry ? "YES" : "NO"}
+                  </div>
                 </div>
 
                 <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
                   <div className="text-[10px] uppercase text-slate-500">Payout</div>
                   <div className="text-sm font-semibold text-slate-200">
                     {myPayoutUsdc != null
-                      ? `${myPayoutUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`
+                      ? `${myPayoutUsdc.toLocaleString(undefined, {
+                          maximumFractionDigits: 6,
+                        })} USDC`
                       : "—"}
                   </div>
                   <div className="text-[11px] text-slate-500 font-mono">
@@ -1622,7 +1747,13 @@ export default function BlockSwap() {
                   myRewardsClaimed === true ||
                   !rewardsAddress
                 }
-                title={!myRewardsEntry ? "Wallet not eligible" : myRewardsClaimed ? "Already claimed" : "Claim rewards"}
+                title={
+                  !myRewardsEntry
+                    ? "Wallet not eligible"
+                    : myRewardsClaimed
+                    ? "Already claimed"
+                    : "Claim rewards"
+                }
               >
                 {myRewardsClaimed === true ? "Already claimed" : "Claim rewards"}
               </button>
@@ -1634,7 +1765,8 @@ export default function BlockSwap() {
               ) : null}
 
               <div className="mt-3 text-[0.75rem] text-slate-500">
-                Proofs are loaded from <span className="font-mono">{rewardsProofsUrl}</span>. Make sure that file exists in{" "}
+                Proofs are loaded from <span className="font-mono">{rewardsProofsUrl}</span>. Make
+                sure that file exists in{" "}
                 <span className="font-mono">theblock-ui/public</span> before deploying.
               </div>
             </div>
