@@ -18,25 +18,19 @@ function useToast(ms = 1600) {
 }
 
 export default function LayoutWrapper({ children }) {
-  // ✅ IMPORTANT: use provider-truth chainId (effectiveChainId) for wrong-chain gating
-  const { isConnected, chainId, effectiveChainId } = useWallet();
-
+  const { isConnected, chainId } = useWallet();
   const location = useLocation();
   const navigate = useNavigate();
   const { toast, setToast } = useToast(1600);
 
-  // ✅ NEVER default to 84532 on mainnet UI; your mainnet should be 8453.
-  // Prefer env; fallback to 8453.
+  // ✅ SAFETY: default to Base MAINNET if env missing
   const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 8453);
-
-  // ✅ Provider-truth chainId, fallback to wagmi chainId if provider-truth not available yet
-  const chainForUi = Number(effectiveChainId || chainId || 0);
 
   const wrongChain =
     isConnected &&
     Number(TARGET_CHAIN_ID) > 0 &&
-    Number(chainForUi || 0) > 0 &&
-    Number(chainForUi) !== Number(TARGET_CHAIN_ID);
+    Number(chainId || 0) > 0 &&
+    Number(chainId) !== Number(TARGET_CHAIN_ID);
 
   // ✅ Single source of truth for routes + "coming soon" gating.
   const navItems = useMemo(
