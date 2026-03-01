@@ -9,43 +9,26 @@ const WALLETCONNECT_PROJECT_ID =
   "";
 
 // ✅ Canonical app URL (use www). Set in Vercel env: VITE_APP_URL=https://www.theblock.live
-const APP_URL = String(import.meta.env.VITE_APP_URL || "https://www.theblock.live").replace(/\/+$/, "");
+const APP_URL = (import.meta.env.VITE_APP_URL || "https://www.theblock.live").replace(/\/+$/, "");
 
-// ✅ Nice to have for WC metadata
-const ICON_URL = String(import.meta.env.VITE_APP_ICON_URL || `${APP_URL}/favicon.ico`).replace(/\/+$/, "");
+// ✅ nice to have for WC metadata
+const ICON_URL = (import.meta.env.VITE_APP_ICON_URL || `${APP_URL}/favicon.ico`).replace(/\/+$/, "");
 
-// ✅ SAFE DEFAULT: Base Mainnet (8453)
-// Only allow Base mainnet (8453) or Base Sepolia (84532)
+// ✅ IMPORTANT: default to Base mainnet (8453), not Sepolia
 const DEFAULT_CHAIN_ID = base.id; // 8453
-const rawChainId = import.meta.env.VITE_CHAIN_ID;
-const targetChainId = Number(rawChainId || DEFAULT_CHAIN_ID);
+const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || DEFAULT_CHAIN_ID);
 
-let chain;
-if (targetChainId === base.id) chain = base;
-else if (targetChainId === baseSepolia.id) chain = baseSepolia;
-else {
-  // hard fail so we never silently run on the wrong chain
-  throw new Error(
-    `[wagmi] Unsupported VITE_CHAIN_ID=${String(rawChainId)} (parsed=${targetChainId}). Use 8453 (Base) or 84532 (Base Sepolia).`
-  );
-}
-
-const rpcUrl = String(import.meta.env.VITE_RPC_URL || chain.rpcUrls.default.http[0]).trim();
-if (!rpcUrl) {
-  throw new Error("[wagmi] Missing RPC URL. Set VITE_RPC_URL or ensure the selected chain has a default RPC.");
-}
+// Choose chain explicitly
+const chain = CHAIN_ID === base.id ? base : baseSepolia;
 
 export const wagmiConfig = createConfig({
   chains: [chain],
   connectors: [
+    // MetaMask connector (injected / SDK behavior)
     metaMask(),
 
-    // Coinbase Wallet
-    coinbaseWallet({
-      appName: "The Block",
-      // Optional but helps some wallets:
-      appLogoUrl: ICON_URL,
-    }),
+    // Coinbase
+    coinbaseWallet({ appName: "The Block" }),
 
     // WalletConnect (ONLY if projectId provided)
     ...(WALLETCONNECT_PROJECT_ID
@@ -53,6 +36,10 @@ export const wagmiConfig = createConfig({
           walletConnect({
             projectId: WALLETCONNECT_PROJECT_ID,
             showQrModal: true,
+
+            // 🔒 FORCE WC session to the chain your app is using (Base in prod)
+            chains: [chain],
+
             metadata: {
               name: "The Block",
               description: "BlockSwap + Rewards",
@@ -64,6 +51,6 @@ export const wagmiConfig = createConfig({
       : []),
   ],
   transports: {
-    [chain.id]: http(rpcUrl),
+    [chain.id]: http(import.meta.env.VITE_RPC_URL || chain.rpcUrls.default.http[0]),
   },
 });
