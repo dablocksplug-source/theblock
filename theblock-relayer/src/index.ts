@@ -22,7 +22,7 @@ const ENV = process.env;
 // env
 // --------------------
 const PORT = Number(ENV.PORT || 8787);
-const CHAIN_ID = Number(ENV.CHAIN_ID || 84532);
+const CHAIN_ID = Number(ENV.CHAIN_ID || 8453);
 
 const RPC_URL = (ENV.RPC_URL || "").trim();
 const RPC_URL_LOGS = (ENV.RPC_URL_LOGS || ENV.LOGS_RPC_URL || "").trim(); // optional
