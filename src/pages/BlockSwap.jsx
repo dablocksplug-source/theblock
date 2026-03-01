@@ -193,9 +193,9 @@ function formatUnitsStr(value, decimals, maxFrac = 6) {
     const neg = bi < 0n;
     const x = neg ? -bi : bi;
 
-    const base = 10n ** BigInt(decimals);
-    const whole = x / base;
-    const frac = x % base;
+    const base10 = 10n ** BigInt(decimals);
+    const whole = x / base10;
+    const frac = x % base10;
 
     let fracStr = frac.toString().padStart(decimals, "0");
     if (maxFrac >= 0) fracStr = fracStr.slice(0, Math.min(decimals, maxFrac));
@@ -220,7 +220,13 @@ export default function BlockSwap() {
   const {
     walletAddress,
     isConnected,
+
+    // keep wagmi chainId for debug only
     chainId,
+
+    // ✅ USE THIS for all gating (provider truth)
+    effectiveChainId,
+
     ensureChain,
     provider, // ✅ ACTIVE connector provider (WalletConnect-safe)
   } = useWallet();
@@ -294,20 +300,14 @@ export default function BlockSwap() {
     }
   }, []);
 
-  // ✅ PRECISE: rewards address resolution priority:
-  // 1) C.REWARDS_ADDRESS (manual override)
-  // 2) deployments file via resolved.deployments.contracts.BlockRewardsMerkle
-  // 3) empty string
   const rewardsAddress = useMemo(() => {
     const isAddr = (v) => /^0x[a-fA-F0-9]{40}$/.test(String(v || "").trim());
     const notZero = (v) =>
       String(v || "").trim().toLowerCase() !== "0x0000000000000000000000000000000000000000";
 
-    // 1) config override
     const fromCfg = String(C.REWARDS_ADDRESS || "").trim();
     if (fromCfg && isAddr(fromCfg) && notZero(fromCfg)) return fromCfg;
 
-    // 2) deployments (adapter-resolved)
     const fromDeploy =
       resolved?.deployments?.contracts?.BlockRewardsMerkle ||
       resolved?.deployments?.BlockRewardsMerkle ||
@@ -334,7 +334,7 @@ export default function BlockSwap() {
   const [rewardsTx, setRewardsTx] = useState("");
 
   const chainObj = useMemo(() => {
-    return Number(C.CHAIN_ID || 84532) === base.id ? base : baseSepolia;
+    return Number(C.CHAIN_ID) === base.id ? base : baseSepolia;
   }, []);
 
   const publicClient = useMemo(() => {
@@ -364,31 +364,31 @@ export default function BlockSwap() {
     } catch {}
   }
 
-  // ✅ HARD bulletproof: confirm chain via ACTIVE connector provider (works for WalletConnect too)
-  async function getActiveChainId() {
+  // ✅ confirm chain via ACTIVE connector provider (works for WalletConnect too)
+  async function getProviderChainIdFallback() {
     try {
       const p = provider;
-      if (!p || typeof p.request !== "function") return Number(chainId || 0);
+      if (!p || typeof p.request !== "function") return Number(effectiveChainId || chainId || 0);
       const hex = await p.request({ method: "eth_chainId" });
       const n = parseInt(String(hex || "0"), 16);
-      return Number.isFinite(n) ? n : Number(chainId || 0);
+      return Number.isFinite(n) ? n : Number(effectiveChainId || chainId || 0);
     } catch {
-      return Number(chainId || 0);
+      return Number(effectiveChainId || chainId || 0);
     }
   }
 
   async function ensureTargetChainOrThrow() {
-    const TARGET_CHAIN_ID = Number(C.CHAIN_ID || 0);
-    if (!TARGET_CHAIN_ID) return;
+    const TARGET = Number(C.CHAIN_ID || 0);
+    if (!TARGET) return;
 
     if (ensureChain) {
-      await ensureChain(TARGET_CHAIN_ID);
+      await ensureChain(TARGET);
     }
 
-    // re-check using provider (not React state)
-    const cid = await getActiveChainId();
-    if (cid && cid !== TARGET_CHAIN_ID) {
-      throw new Error(`Wrong network. Switch to chain ${TARGET_CHAIN_ID}.`);
+    // Re-check using provider truth
+    const cid = await getProviderChainIdFallback();
+    if (cid && cid !== TARGET) {
+      throw new Error(`Wrong network. Switch to chain ${TARGET}.`);
     }
   }
 
@@ -446,8 +446,7 @@ export default function BlockSwap() {
   const isAdmin = useMemo(() => {
     if (!walletAddress) return false;
     return (
-      String(walletAddress).toLowerCase() ===
-      String(C.ADMIN_WALLET || "").toLowerCase()
+      String(walletAddress).toLowerCase() === String(C.ADMIN_WALLET || "").toLowerCase()
     );
   }, [walletAddress]);
 
@@ -470,17 +469,15 @@ export default function BlockSwap() {
   const sellFloorBrick = sellFloorOz ? sellFloorOz * ozPerBrick : 0;
 
   const buyCost = useMemo(() => buyTotalOz * buyPriceOz, [buyTotalOz, buyPriceOz]);
-  const sellProceeds = useMemo(
-    () => sellTotalOz * sellFloorOz,
-    [sellTotalOz, sellFloorOz]
-  );
+  const sellProceeds = useMemo(() => sellTotalOz * sellFloorOz, [sellTotalOz, sellFloorOz]);
 
-  const chainReady = Number(chainId) > 0;
+  // ✅ provider-truth gating
+  const chainReady = Number(effectiveChainId || 0) > 0 || Number(chainId || 0) > 0;
   const wrongChain =
     isConnected &&
     Number(TARGET_CHAIN_ID) > 0 &&
     chainReady &&
-    Number(chainId) !== Number(TARGET_CHAIN_ID);
+    Number(effectiveChainId || chainId || 0) !== Number(TARGET_CHAIN_ID);
 
   const canBuy =
     isConnected && !wrongChain && !snap?.buyPaused && buyTotalOz > 0 && !!RELAYER_URL;
@@ -583,12 +580,8 @@ export default function BlockSwap() {
       const bust = `&_t=${Date.now()}`;
 
       const [act, hol] = await Promise.all([
-        fetchJson(`${baseUrl}/feed/activity?limit=${FEED_LIMIT}${bust}`, {
-          timeoutMs: 15_000,
-        }),
-        fetchJson(`${baseUrl}/feed/holders?limit=${HOLDERS_LIMIT}${bust}`, {
-          timeoutMs: 15_000,
-        }),
+        fetchJson(`${baseUrl}/feed/activity?limit=${FEED_LIMIT}${bust}`, { timeoutMs: 15_000 }),
+        fetchJson(`${baseUrl}/feed/holders?limit=${HOLDERS_LIMIT}${bust}`, { timeoutMs: 15_000 }),
       ]);
 
       const rowsA = Array.isArray(act?.rows) ? act.rows : [];
@@ -710,8 +703,7 @@ export default function BlockSwap() {
 
       const target = String(walletAddress).toLowerCase();
       const mine =
-        entries.find((e) => String(e?.wallet || "").toLowerCase() === target) ||
-        null;
+        entries.find((e) => String(e?.wallet || "").toLowerCase() === target) || null;
       if (mountedRef.current) setMyRewardsEntry(mine);
 
       const abi = MERKLE_ABI || MERKLE_MIN_ABI;
@@ -743,8 +735,7 @@ export default function BlockSwap() {
         setMyRewardsClaimed(!!claimed);
       }
     } catch (e) {
-      if (mountedRef.current)
-        setRewardsErr(e?.message || "Failed to load rewards data.");
+      if (mountedRef.current) setRewardsErr(e?.message || "Failed to load rewards data.");
     } finally {
       if (mountedRef.current) setRewardsLoading(false);
     }
@@ -811,7 +802,6 @@ export default function BlockSwap() {
       if (!RELAYER_URL)
         throw new Error("Relayer is not configured. Buys are gasless-only in this build.");
 
-      // ✅ bulletproof network confirmation
       await ensureTargetChainOrThrow();
 
       setLoading(true);
@@ -880,8 +870,7 @@ export default function BlockSwap() {
     "—";
 
   const swapOzInvRaw = snap?.fmt?.ozInventory ?? snap?.fmt?.swapOz ?? "—";
-  const swapOzInvPretty =
-    swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
+  const swapOzInvPretty = swapOzInvRaw === "—" ? "—" : prettyMaybeNumberString(swapOzInvRaw, 6);
 
   const inventoryLooksSuspicious =
     String(swapOzInvRaw) !== "—" && Number(swapOzInvRaw) === 0 && snap?.sellPricePerBrick;
@@ -991,7 +980,6 @@ export default function BlockSwap() {
   }, [myRewardsEntry]);
 
   return (
-    // content offset for global header
     <div className="min-h-screen bg-slate-950 text-slate-50 pt-20">
       <main className="mx-auto max-w-6xl px-4 pb-16 pt-6">
         {/* Top controls (connect lives in global header now) */}
@@ -1075,6 +1063,13 @@ export default function BlockSwap() {
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-500">
                   Target ChainId: <span className="text-slate-300">{TARGET_CHAIN_ID || "—"}</span>
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-500">
+                  Wallet chain (wagmi/provider):{" "}
+                  <span className="text-slate-300">
+                    {Number(chainId || 0) || "—"} / {Number(effectiveChainId || 0) || "—"}
+                  </span>
                 </span>
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-500">
@@ -1177,7 +1172,7 @@ export default function BlockSwap() {
               <BlockSwapAdminPanel
                 walletAddress={walletAddress}
                 adminWallet={C.ADMIN_WALLET}
-                chainId={chainId}
+                chainId={Number(effectiveChainId || chainId || 0)}
                 targetChainId={TARGET_CHAIN_ID}
                 ensureChain={ensureChain}
                 stableSymbol={STABLE}
@@ -1535,7 +1530,6 @@ export default function BlockSwap() {
           </div>
 
           <div className="mt-3 grid gap-2 md:grid-cols-3">
-            {/* ✅ PRECISE: pass real value; ContractRow handles empty -> "—" and disables copy */}
             <ContractRow label="Rewards (Merkle)" value={rewardsAddress} />
             <div className="rounded-lg border border-slate-800/70 bg-slate-950/60 px-3 py-2">
               <div className="text-[10px] uppercase text-slate-500">Proofs URL</div>
