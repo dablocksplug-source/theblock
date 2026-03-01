@@ -35,14 +35,28 @@ function chainFromConfig() {
   return Number(C.CHAIN_ID) === base.id ? base : baseSepolia;
 }
 
+function looksLikeAlchemyMissingKey(url) {
+  const u = sanitizeUrl(url);
+  return !!u && /alchemy\.com\/v2\/?$/.test(u);
+}
+
 function resolveRpcUrl() {
   const chain = chainFromConfig();
+
+  // ✅ parity with blockswapAdapter (mainnet + sepolia env support)
   const rpc =
+    sanitizeUrl(C.RPC_URL) ||
     sanitizeUrl(import.meta.env.VITE_RPC_URL) ||
+    sanitizeUrl(import.meta.env.VITE_BASE_MAINNET_RPC) ||
+    sanitizeUrl(import.meta.env.VITE_BASE_SEPOLIA_RPC) ||
     chain?.rpcUrls?.default?.http?.[0] ||
     chain?.rpcUrls?.public?.http?.[0];
 
   if (!rpc) throw new Error("Missing RPC URL. Set VITE_RPC_URL.");
+  if (looksLikeAlchemyMissingKey(rpc)) {
+    // not fatal, but helps catch “alchemy.com/v2/” missing key mistakes
+    dlog("RPC looks like missing Alchemy key; verify env:", rpc);
+  }
   return rpc;
 }
 
@@ -117,7 +131,9 @@ async function resolveRegistryAddress() {
   const addr = sanitizeUrl(import.meta.env.VITE_NICKNAME_REGISTRY_ADDRESS);
   if (addr && isAddress(addr)) return addr;
 
-  const url = Number(C.CHAIN_ID) === 8453 ? "/deployments.base.json" : "/deployments.baseSepolia.json";
+  // ✅ match your UI deployments names
+  const url = Number(C.CHAIN_ID) === 8453 ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
+
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (res.ok) {
@@ -273,11 +289,9 @@ function normalizeSigTo65(sigLike) {
   throw new Error(`Signature invalid length (${len}).`);
 }
 
-// Always return a signature HEX STRING or throw
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
-  // 0) wake wallet / ensure account is authorized (helps MetaMask Mobile)
   try {
     await withTimeout(
       provider.request({ method: "eth_requestAccounts", params: [] }),
@@ -285,18 +299,16 @@ async function signRawHash({ provider, chain, account, msgHash }) {
       "Wallet did not respond to eth_requestAccounts (timeout). Open your wallet app and try again."
     );
   } catch (e) {
-    // not fatal; continue — some wallets reject if already connected
     lastErr = e;
   }
 
-  // 1) preferred: viem walletClient.signMessage raw bytes32
   try {
     const wc = createWalletClient({ chain, transport: custom(provider) });
     const sig = await withTimeout(
       wc.signMessage({ account, message: { raw: msgHash } }),
       45_000,
       isProbablyMobile()
-        ? "Signature request timed out (mobile). Open the dapp inside MetaMask Browser or use WalletConnect, then try again."
+        ? "Signature request timed out (mobile). Open the dapp inside your wallet browser or use WalletConnect, then try again."
         : "Signature request timed out. Check your wallet popup and try again."
     );
     return extractHexSigFromAny(sig);
@@ -304,14 +316,11 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     lastErr = e;
   }
 
-  // 2) fallback: personal_sign (param order varies across wallets)
   try {
     const sig = await withTimeout(
       provider.request({ method: "personal_sign", params: [msgHash, account] }),
       45_000,
-      isProbablyMobile()
-        ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-        : "personal_sign timed out."
+      isProbablyMobile() ? "personal_sign timed out (mobile)." : "personal_sign timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e1) {
@@ -320,9 +329,7 @@ async function signRawHash({ provider, chain, account, msgHash }) {
       const sig = await withTimeout(
         provider.request({ method: "personal_sign", params: [account, msgHash] }),
         45_000,
-        isProbablyMobile()
-          ? "personal_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-          : "personal_sign timed out."
+        isProbablyMobile() ? "personal_sign timed out (mobile)." : "personal_sign timed out."
       );
       return extractHexSigFromAny(sig);
     } catch (e2) {
@@ -330,31 +337,27 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     }
   }
 
-  // 3) fallback: eth_sign (some wallets support when personal_sign is flaky)
   try {
     const sig = await withTimeout(
       provider.request({ method: "eth_sign", params: [account, msgHash] }),
       45_000,
-      isProbablyMobile()
-        ? "eth_sign timed out (mobile). Use MetaMask Browser or WalletConnect."
-        : "eth_sign timed out."
+      isProbablyMobile() ? "eth_sign timed out (mobile)." : "eth_sign timed out."
     );
     return extractHexSigFromAny(sig);
   } catch (e3) {
     lastErr = e3;
   }
 
-  const base =
-    lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
+  const baseMsg = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
 
   if (isProbablyMobile()) {
     throw new Error(
-      `${base}\n\nMobile tip: If you opened the dapp in Chrome/Safari and it kicked you into MetaMask, the confirm can fail to appear.\n` +
-        `Fix: open the dapp INSIDE MetaMask app (MetaMask → Browser) OR connect using WalletConnect.`
+      `${baseMsg}\n\nMobile tip: if you opened the dapp in Chrome/Safari and it kicked you into a wallet app, the confirm can fail to appear.\n` +
+        `Fix: open the dapp inside the wallet’s in-app browser, or connect via WalletConnect.`
     );
   }
 
-  throw new Error(base);
+  throw new Error(baseMsg);
 }
 
 export async function getNickname(walletAddress) {
@@ -379,12 +382,6 @@ export async function getNickname(walletAddress) {
   return String(name || "");
 }
 
-/**
- * ✅ PREPARE gasless nickname:
- * Do RPC reads (chainId/nonce) BEFORE the user taps “Save Name”.
- * This makes the actual Save click go straight into the signature prompt,
- * which is critical for MetaMask Mobile reliability.
- */
 export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");
@@ -404,7 +401,6 @@ export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provide
     transport: http(rpc, { timeout: 20_000, retryCount: 1, retryDelay: 450 }),
   });
 
-  // Source of truth is RPC chainId (matches relayer target)
   const rpcChainId = await withTimeout(
     pc.getChainId().catch(() => Number(C.CHAIN_ID)),
     12_000,
@@ -415,9 +411,7 @@ export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provide
 
   if (Number(walletChainId) !== Number(rpcChainId)) {
     throw new Error(
-      `Wrong network in wallet.\n` +
-        `Wallet chainId=${walletChainId}, expected=${rpcChainId}.\n` +
-        `Fix: switch your wallet network to match BlockSwap (target chainId=${rpcChainId}).`
+      `Wrong network in wallet.\nWallet chainId=${walletChainId}, expected=${rpcChainId}.\nFix: switch networks.`
     );
   }
 
@@ -458,10 +452,6 @@ export async function prepareNicknameRelayed(nick, walletAddress, eip1193Provide
   };
 }
 
-/**
- * Gasless nickname (relayer pays gas)
- * If `prepared` is provided, we skip all pre-work and go straight to signing.
- */
 export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, prepared) {
   const relayerUrl = resolveRelayerUrl();
   if (!relayerUrl) throw new Error("Missing VITE_RELAYER_URL (local .env.local + Vercel env).");
@@ -474,7 +464,6 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
 
   const chain = chainFromConfig();
 
-  // ✅ If we have prepared values, do NOT do extra RPC calls here.
   const prep = prepared || (await prepareNicknameRelayed(nick, walletAddress, provider));
   const trimmed = String(prep?.nick || "").trim();
 
@@ -484,7 +473,6 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
 
   dlog("hash", { deadline: prep.deadline, msgHash: prep.msgHash });
 
-  // 🔥 This is the critical part: on mobile, we want this triggered directly from the Save button.
   const rawSigHex = await signRawHash({
     provider,
     chain,
@@ -528,9 +516,6 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
   return j;
 }
 
-/**
- * Direct on-chain nickname write (only if you flip VITE_ALLOW_DIRECT_NICKNAME=1)
- */
 export async function setNicknameDirect(nick, walletAddress, eip1193Provider) {
   const user = walletAddress;
   if (!user || !isAddress(user)) throw new Error("Connect wallet first.");

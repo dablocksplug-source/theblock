@@ -16,7 +16,7 @@ import {
   encodeAbiParameters,
   toHex,
   signatureToHex,
-  getAddress, // ✅ NEW: checksum-normalize addresses safely
+  getAddress, // ✅ checksum-normalize addresses safely
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -90,7 +90,6 @@ function mustAddr(label, v) {
     return getAddress(s);
   } catch {
     if (!isAddress(s)) throw new Error(`Bad ${label} address: ${v}`);
-    // rare: isAddress true but getAddress throws checksum-related
     throw new Error(`Bad ${label} address (checksum): ${v}`);
   }
 }
@@ -98,9 +97,9 @@ function mustAddr(label, v) {
 // deployments loader
 let __deploymentsCache = { atMs: 0, data: null };
 
-// ✅ FIX: mainnet file name should match what we copied to /public
+// ✅ mainnet file name should match what we copied to /public
 // - mainnet:  /deployments.baseMainnet.json
-// - sepolia:   /deployments.baseSepolia.json
+// - sepolia:  /deployments.baseSepolia.json
 const DEPLOYMENTS_URL =
   Number(C.CHAIN_ID) === 8453 ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
 
@@ -272,7 +271,6 @@ function nowMs() {
 }
 
 function toBn6(amountStr) {
-  // IMPORTANT: reject empty/undefined early so admin UI doesn’t silently become 0
   const s = String(amountStr ?? "").trim();
   if (!s) return 0n;
   return parseUnits(s, 6);
@@ -350,7 +348,7 @@ function buildBuyRelayedMsgHash({ buyer, ozWei, nonce, deadline, swapAddress, ch
 }
 
 // -------------------------------
-// SIGNATURE NORMALIZATION (64->65 safe, Coinbase mobile safe)
+// SIGNATURE NORMALIZATION (64->65 safe, Coinbase/Trust v=0/1 safe)
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -401,6 +399,7 @@ function extractHexSigFromAny(raw) {
   throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
 }
 
+// EIP-2098 compact 64-byte -> 65-byte
 function expandCompactSig(sigLike) {
   const s = extractHexSigFromAny(sigLike);
   if (s.length === 132) return s;
@@ -419,8 +418,21 @@ function expandCompactSig(sigLike) {
   return `0x${r}${sFixed}${vHex}`;
 }
 
+// ✅ normalize v byte for 65-byte signatures too (Coinbase/Trust often return 0/1)
+function normalizeVTo27(sig65) {
+  const hex = String(sig65 || "").trim();
+  if (!isHexOnly(hex) || hex.length !== 132) return hex;
+
+  const vHex = hex.slice(130, 132).toLowerCase();
+  if (vHex === "00") return hex.slice(0, 130) + "1b";
+  if (vHex === "01") return hex.slice(0, 130) + "1c";
+  return hex;
+}
+
 function assertSig(label, sigLike) {
-  const full = expandCompactSig(sigLike);
+  let full = expandCompactSig(sigLike);
+  full = normalizeVTo27(full);
+
   if (!isHexOnly(full) || full.length !== 132) {
     throw new Error(`${label} invalid after normalization (len=${String(full || "").length}).`);
   }
@@ -559,15 +571,12 @@ export const blockswapAdapter = {
 
   // -------------------------------
   // ✅ ADMIN: set prices (accept BOTH param styles)
-  // Panel sends: sellPricePerBrick + buybackFloorPerBrick
-  // Adapter also accepts: sellPerBrick + floorPerBrick
   // -------------------------------
   async adminSetPrices(args) {
     const { SWAP } = await resolveAddresses();
     const walletAddress = args?.walletAddress;
     if (!walletAddress) throw new Error("Connect wallet.");
 
-    // accept either naming scheme
     const sellStr = args?.sellPricePerBrick ?? args?.sellPerBrick ?? args?.sell ?? "";
     const floorStr = args?.buybackFloorPerBrick ?? args?.floorPerBrick ?? args?.floor ?? "";
 
@@ -740,7 +749,6 @@ export const blockswapAdapter = {
       coverageDisplay = (Number(formatUnits(ratio6, 6)) || 0).toFixed(3);
     }
 
-    // solvent estimate (optional): vault >= liability
     const isSolvent = floorLiabilityUSDC === 0n ? true : swapUsdcBal >= floorLiabilityUSDC;
 
     return {
@@ -993,6 +1001,7 @@ export const blockswapAdapter = {
 
     const rawPermitSig = await wc.signTypedData({ account: walletAddress, domain, types, primaryType: "Permit", message });
 
+    // ✅ normalize BOTH sigs to v=27/28 so relayer/contract can recover consistently across wallets
     const buySignature = assertSig("buySignature", rawBuySig);
     const permitSignature = assertSig("permitSignature", rawPermitSig);
 
