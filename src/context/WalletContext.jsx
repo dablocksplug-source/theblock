@@ -9,15 +9,48 @@ import React, {
   useState,
 } from "react";
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
+import { base, baseSepolia } from "wagmi/chains";
 
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const WalletContext = createContext(null);
 
-const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 84532);
+// ✅ SAFE DEFAULT: Base Mainnet (8453)
+// Only allow Base mainnet (8453) or Base Sepolia (84532)
+const DEFAULT_CHAIN_ID = base.id; // 8453
+const RAW_TARGET_CHAIN_ID = import.meta.env.VITE_CHAIN_ID;
+const PARSED_TARGET_CHAIN_ID = Number(RAW_TARGET_CHAIN_ID || DEFAULT_CHAIN_ID);
+
+if (![base.id, baseSepolia.id].includes(PARSED_TARGET_CHAIN_ID)) {
+  throw new Error(
+    `[WalletContext] Unsupported VITE_CHAIN_ID=${String(RAW_TARGET_CHAIN_ID)} (parsed=${PARSED_TARGET_CHAIN_ID}). Use 8453 (Base) or 84532 (Base Sepolia).`
+  );
+}
+
+const TARGET_CHAIN_ID = PARSED_TARGET_CHAIN_ID;
 
 function norm(s) {
   return String(s || "").toLowerCase().trim();
+}
+
+function normalizeChainId(x) {
+  if (x == null) return 0;
+  if (typeof x === "number") return Number.isFinite(x) ? x : 0;
+  const s = String(x).trim();
+  if (!s) return 0;
+  if (s.startsWith("0x")) {
+    const n = parseInt(s, 16);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function chainName(chainId) {
+  const id = normalizeChainId(chainId);
+  if (id === base.id) return "Base";
+  if (id === baseSepolia.id) return "Base Sepolia";
+  return `Chain ${id || "?"}`;
 }
 
 function isMobileish() {
@@ -74,9 +107,6 @@ function isPendingPermissionsError(e) {
 }
 
 function looksInjectedProvider(p) {
-  // We only want this check as a heuristic.
-  // MetaMask injected provider usually has isMetaMask=true.
-  // WalletConnect provider often has a session field or isWalletConnect flag.
   try {
     if (!p) return false;
     if (p.isMetaMask) return true;
@@ -85,6 +115,21 @@ function looksInjectedProvider(p) {
   } catch {
     return false;
   }
+}
+
+function isUserRejected(e) {
+  const msg = String(e?.message || e || "");
+  return (
+    e?.code === 4001 ||
+    /user rejected/i.test(msg) ||
+    /rejected/i.test(msg)
+  );
+}
+
+function isUnrecognizedChain(e) {
+  const msg = String(e?.message || e || "");
+  // 4902 is common for "unknown chain" in injected wallets
+  return e?.code === 4902 || /unrecognized chain/i.test(msg) || /unknown chain/i.test(msg);
 }
 
 export function WalletProvider({ children }) {
@@ -171,7 +216,6 @@ export function WalletProvider({ children }) {
 
           // If provider looks like MetaMask injected, it means the flow got hijacked
           if (looksInjectedProvider(p)) {
-            // clean disconnect to avoid weird stuck state
             try {
               disconnect();
             } catch {}
@@ -249,13 +293,42 @@ export function WalletProvider({ children }) {
 
   const ensureChain = useCallback(
     async (targetChainId) => {
-      const target = Number(targetChainId || 0);
+      const target = normalizeChainId(targetChainId || TARGET_CHAIN_ID);
       if (!target) return;
 
-      if (!switchChainAsync) throw new Error("switchChainAsync not available.");
-      if (Number(chainId || 0) === target) return;
+      const current = normalizeChainId(chainId);
 
-      await switchChainAsync({ chainId: target });
+      // already good
+      if (current === target) return;
+
+      if (!switchChainAsync) {
+        throw new Error(
+          `This wallet connection can't switch networks automatically.\n\nYou're on ${chainName(
+            current
+          )}. Please switch to ${chainName(target)} inside your wallet, then reconnect.`
+        );
+      }
+
+      try {
+        await switchChainAsync({ chainId: target });
+      } catch (e) {
+        // WalletConnect/TrustWallet often needs a reconnect if the session is stuck on the old chain
+        if (isUserRejected(e)) {
+          throw new Error("Network switch was rejected in the wallet.");
+        }
+        if (isUnrecognizedChain(e)) {
+          throw new Error(
+            `Your wallet doesn't recognize ${chainName(target)}.\n\nFix:\n• Add/switch to Base in the wallet\n• Then disconnect + reconnect your session`
+          );
+        }
+
+        const msg = String(e?.shortMessage || e?.message || e || "");
+        throw new Error(
+          `Couldn't switch network automatically.\n\nYou're on ${chainName(current)} but need ${chainName(
+            target
+          )}.\n\nIf you're using Trust Wallet via WalletConnect:\n• Disconnect from the site\n• In Trust Wallet, disconnect the WalletConnect session\n• Reconnect while already on ${chainName(target)}\n\nDetails: ${msg}`
+        );
+      }
     },
     [switchChainAsync, chainId]
   );
@@ -280,7 +353,6 @@ export function WalletProvider({ children }) {
         const keys = Object.keys(window.localStorage);
         for (const k of keys) {
           if (k.toLowerCase().includes("walletconnect") || k.toLowerCase().includes("wagmi")) {
-            // don’t nuke everything, only relevant keys
             window.localStorage.removeItem(k);
           }
         }
@@ -310,7 +382,9 @@ export function WalletProvider({ children }) {
       account: address,
       walletAddress: address,
       isConnected,
-      chainId: Number(chainId || 0),
+
+      // NOTE: keep it numeric and normalized
+      chainId: normalizeChainId(chainId),
 
       // ✅ expose active signer provider (MetaMask/Coinbase/WC)
       provider,
@@ -332,6 +406,7 @@ export function WalletProvider({ children }) {
       availableConnectors,
 
       targetChainId: TARGET_CHAIN_ID,
+      targetChainName: chainName(TARGET_CHAIN_ID),
     }),
     [
       address,
