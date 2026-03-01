@@ -9,48 +9,15 @@ import React, {
   useState,
 } from "react";
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
-import { base, baseSepolia } from "wagmi/chains";
 
 import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const WalletContext = createContext(null);
 
-// ✅ SAFE DEFAULT: Base Mainnet (8453)
-// Only allow Base mainnet (8453) or Base Sepolia (84532)
-const DEFAULT_CHAIN_ID = base.id; // 8453
-const RAW_TARGET_CHAIN_ID = import.meta.env.VITE_CHAIN_ID;
-const PARSED_TARGET_CHAIN_ID = Number(RAW_TARGET_CHAIN_ID || DEFAULT_CHAIN_ID);
-
-if (![base.id, baseSepolia.id].includes(PARSED_TARGET_CHAIN_ID)) {
-  throw new Error(
-    `[WalletContext] Unsupported VITE_CHAIN_ID=${String(RAW_TARGET_CHAIN_ID)} (parsed=${PARSED_TARGET_CHAIN_ID}). Use 8453 (Base) or 84532 (Base Sepolia).`
-  );
-}
-
-const TARGET_CHAIN_ID = PARSED_TARGET_CHAIN_ID;
+const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 84532);
 
 function norm(s) {
   return String(s || "").toLowerCase().trim();
-}
-
-function normalizeChainId(x) {
-  if (x == null) return 0;
-  if (typeof x === "number") return Number.isFinite(x) ? x : 0;
-  const s = String(x).trim();
-  if (!s) return 0;
-  if (s.startsWith("0x")) {
-    const n = parseInt(s, 16);
-    return Number.isFinite(n) ? n : 0;
-  }
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function chainName(chainId) {
-  const id = normalizeChainId(chainId);
-  if (id === base.id) return "Base";
-  if (id === baseSepolia.id) return "Base Sepolia";
-  return `Chain ${id || "?"}`;
 }
 
 function isMobileish() {
@@ -117,19 +84,30 @@ function looksInjectedProvider(p) {
   }
 }
 
-function isUserRejected(e) {
-  const msg = String(e?.message || e || "");
-  return (
-    e?.code === 4001 ||
-    /user rejected/i.test(msg) ||
-    /rejected/i.test(msg)
-  );
+// --- provider helpers ---
+async function getProviderChainId(p, fallback = 0) {
+  try {
+    if (!p || typeof p.request !== "function") return Number(fallback || 0);
+    const hex = await p.request({ method: "eth_chainId" });
+    const n = parseInt(String(hex || "0"), 16);
+    return Number.isFinite(n) ? n : Number(fallback || 0);
+  } catch {
+    return Number(fallback || 0);
+  }
 }
 
-function isUnrecognizedChain(e) {
-  const msg = String(e?.message || e || "");
-  // 4902 is common for "unknown chain" in injected wallets
-  return e?.code === 4902 || /unrecognized chain/i.test(msg) || /unknown chain/i.test(msg);
+function isSwitchNotSupportedError(e) {
+  const msg = String(e?.shortMessage || e?.message || e || "").toLowerCase();
+  // wallets vary wildly here; we treat these as "manual switch required"
+  return (
+    /unsupported/i.test(msg) ||
+    /not supported/i.test(msg) ||
+    /does not support/i.test(msg) ||
+    /rejected/i.test(msg) ||
+    /user rejected/i.test(msg) ||
+    /request rejected/i.test(msg) ||
+    /4001/.test(msg) // EIP-1193 user rejected
+  );
 }
 
 export function WalletProvider({ children }) {
@@ -213,8 +191,6 @@ export function WalletProvider({ children }) {
         // ✅ If user chose WalletConnect, make sure we didn't accidentally end up with injected provider
         if (enforceWalletConnect) {
           const p = await c.getProvider?.().catch(() => null);
-
-          // If provider looks like MetaMask injected, it means the flow got hijacked
           if (looksInjectedProvider(p)) {
             try {
               disconnect();
@@ -243,13 +219,7 @@ export function WalletProvider({ children }) {
         connectInFlightRef.current = false;
       }
     },
-    [
-      connectAsync,
-      setAdapterProviderFromConnector,
-      availableConnectors,
-      status,
-      disconnect,
-    ]
+    [connectAsync, setAdapterProviderFromConnector, availableConnectors, status, disconnect]
   );
 
   const connectMetaMask = useCallback(async () => {
@@ -279,7 +249,6 @@ export function WalletProvider({ children }) {
         "WalletConnect connector not found.\nMake sure VITE_WC_PROJECT_ID is set in Vercel + local env."
       );
     }
-    // ✅ enforce true WC session (don’t silently fall into injected)
     return connectWith(c, "WalletConnect", { enforceWalletConnect: true });
   }, [connectors, connectWith]);
 
@@ -291,49 +260,52 @@ export function WalletProvider({ children }) {
     return connectWith(mm || cb || wc || first, "Connect Wallet");
   }, [connectors, connectWith]);
 
+  /**
+   * ✅ PROVIDER-FIRST ensureChain
+   * - Some WalletConnect wallets (TrustWallet esp.) report stale/odd wagmi chainId temporarily.
+   * - If provider already on target, DO NOT call switchChainAsync (it may throw even when correct).
+   * - Only attempt switch when provider chainId is actually wrong.
+   */
   const ensureChain = useCallback(
     async (targetChainId) => {
-      const target = normalizeChainId(targetChainId || TARGET_CHAIN_ID);
+      const target = Number(targetChainId || 0);
       if (!target) return;
 
-      const current = normalizeChainId(chainId);
+      // If we have an active provider, trust it first.
+      const p = provider;
+      const providerCid = await getProviderChainId(p, chainId);
 
-      // already good
-      if (current === target) return;
+      if (providerCid === target) return;
 
+      // If provider is wrong, try wagmi switch (if supported)
       if (!switchChainAsync) {
-        throw new Error(
-          `This wallet connection can't switch networks automatically.\n\nYou're on ${chainName(
-            current
-          )}. Please switch to ${chainName(target)} inside your wallet, then reconnect.`
-        );
+        throw new Error(`Wrong network. Please switch your wallet to chain ${target}.`);
       }
 
       try {
         await switchChainAsync({ chainId: target });
       } catch (e) {
-        // WalletConnect/TrustWallet often needs a reconnect if the session is stuck on the old chain
-        if (isUserRejected(e)) {
-          throw new Error("Network switch was rejected in the wallet.");
-        }
-        if (isUnrecognizedChain(e)) {
+        // After failure, re-check provider — sometimes the wallet DID switch but wagmi threw.
+        const afterCid = await getProviderChainId(p, chainId);
+        if (afterCid === target) return;
+
+        if (isSwitchNotSupportedError(e)) {
           throw new Error(
-            `Your wallet doesn't recognize ${chainName(target)}.\n\nFix:\n• Add/switch to Base in the wallet\n• Then disconnect + reconnect your session`
+            `Wrong network. Please switch your wallet to Base (8453) manually, then retry.`
           );
         }
+        throw e;
+      }
 
-        const msg = String(e?.shortMessage || e?.message || e || "");
-        throw new Error(
-          `Couldn't switch network automatically.\n\nYou're on ${chainName(current)} but need ${chainName(
-            target
-          )}.\n\nIf you're using Trust Wallet via WalletConnect:\n• Disconnect from the site\n• In Trust Wallet, disconnect the WalletConnect session\n• Reconnect while already on ${chainName(target)}\n\nDetails: ${msg}`
-        );
+      // Final confirmation (avoid stale wagmi state)
+      const finalCid = await getProviderChainId(p, chainId);
+      if (finalCid !== target) {
+        throw new Error(`Wrong network. Switch to chain ${target}.`);
       }
     },
-    [switchChainAsync, chainId]
+    [switchChainAsync, chainId, provider]
   );
 
-  // ✅ Hard reset: useful when mobile keeps reconnecting same account/session
   const hardResetConnection = useCallback(() => {
     try {
       connectInFlightRef.current = false;
@@ -347,7 +319,6 @@ export function WalletProvider({ children }) {
     } catch {}
     setProvider(null);
 
-    // Clear some walletconnect storage keys (best-effort; safe)
     try {
       if (typeof window !== "undefined" && window.localStorage) {
         const keys = Object.keys(window.localStorage);
@@ -382,11 +353,8 @@ export function WalletProvider({ children }) {
       account: address,
       walletAddress: address,
       isConnected,
+      chainId: Number(chainId || 0),
 
-      // NOTE: keep it numeric and normalized
-      chainId: normalizeChainId(chainId),
-
-      // ✅ expose active signer provider (MetaMask/Coinbase/WC)
       provider,
 
       connectWallet,
@@ -395,7 +363,6 @@ export function WalletProvider({ children }) {
       connectWalletConnect,
       disconnectWallet,
 
-      // ✅ for tough mobile cases
       hardResetConnection,
 
       ensureChain,
@@ -406,7 +373,6 @@ export function WalletProvider({ children }) {
       availableConnectors,
 
       targetChainId: TARGET_CHAIN_ID,
-      targetChainName: chainName(TARGET_CHAIN_ID),
     }),
     [
       address,
