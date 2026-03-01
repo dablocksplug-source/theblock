@@ -43,6 +43,11 @@ function mustRpc() {
   return RPC_FROM_ENV;
 }
 
+// ✅ Single source of truth for deployments JSON filename in /public
+// - mainnet: /deployments.baseMainnet.json
+// - sepolia: /deployments.baseSepolia.json
+const DEPLOYMENTS_URL = IS_MAINNET ? "/deployments.baseMainnet.json" : "/deployments.baseSepolia.json";
+
 export const BLOCKSWAP_CONFIG = {
   STORAGE_KEY: "theblock:blockswap:v1",
 
@@ -83,11 +88,12 @@ export const BLOCKSWAP_CONFIG = {
 
   RPC_URL: mustRpc(),
 
+  // ✅ Deployments JSON (preferred source for addresses)
+  // Your adapters/pages should prefer this file in /public over env fallbacks.
+  DEPLOYMENTS_URL,
+
   // ✅ Addresses are FALLBACK ONLY.
-  // Your adapters/pages prefer deployments JSON in /public:
-  //  - mainnet: /deployments.base.json
-  //  - testnet: /deployments.baseSepolia.json
-  // If that file is stale, you'll hit old contracts / mismatched ABIs.
+  // If DEPLOYMENTS_URL is stale, you'll hit old contracts / mismatched ABIs.
   USDC_ADDRESS: (ENV.VITE_USDC_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
   OZ_ADDRESS: (ENV.VITE_OZ_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
   BLOCKSWAP_ADDRESS: (ENV.VITE_BLOCKSWAP_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
@@ -96,7 +102,9 @@ export const BLOCKSWAP_CONFIG = {
   // Prefer deployments file if you are writing it (recommended).
   // Only set env override if you intentionally want to bypass deployments.
   REWARDS_ADDRESS:
-    (ENV.VITE_REWARDS_ADDRESS || ENV.VITE_REWARDS_MERKLE_ADDRESS || "0x0000000000000000000000000000000000000000").trim(),
+    (ENV.VITE_REWARDS_ADDRESS ||
+      ENV.VITE_REWARDS_MERKLE_ADDRESS ||
+      "0x0000000000000000000000000000000000000000").trim(),
   REWARDS_ROUND_ID: Number(ENV.VITE_REWARDS_ROUND_ID || 1),
   REWARDS_PROOFS_URL: (ENV.VITE_REWARDS_PROOFS_URL || "/rewards/round1.proofs.json").trim(),
 };
