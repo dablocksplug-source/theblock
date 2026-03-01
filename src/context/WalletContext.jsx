@@ -14,6 +14,7 @@ import { blockswapAdapter } from "../services/blockswapAdapter";
 
 const WalletContext = createContext(null);
 
+// ✅ single source of truth for target chain (default mainnet)
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 8453);
 
 function norm(s) {
@@ -31,7 +32,6 @@ function isMobileish() {
 
 function findConnector(connectors, { ids = [], nameIncludes = [] } = {}) {
   const list = Array.isArray(connectors) ? connectors : [];
-
   for (const wantId of ids) {
     const hit = list.find((c) => norm(c?.id) === norm(wantId));
     if (hit) return hit;
@@ -99,6 +99,14 @@ function hexToDecChainId(hex) {
   }
 }
 
+function withTimeout(promise, ms, message) {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
 export function WalletProvider({ children }) {
   const { address, isConnected, chainId: wagmiChainId, connector } = useAccount();
   const { connectAsync, connectors, status, error } = useConnect();
@@ -110,7 +118,7 @@ export function WalletProvider({ children }) {
   // ✅ active EIP-1193 provider for the CONNECTED connector
   const [provider, setProvider] = useState(null);
 
-  // ✅ real chainId from provider (WalletConnect/Trust/Coinbase can disagree with wagmi state)
+  // ✅ provider-truth chainId (mobile wallets can disagree w/ wagmi)
   const [effectiveChainId, setEffectiveChainId] = useState(0);
 
   const availableConnectors = useMemo(() => {
@@ -121,44 +129,92 @@ export function WalletProvider({ children }) {
     }));
   }, [connectors]);
 
-  const refreshEffectiveChainId = useCallback(async (p, fallback) => {
-    try {
-      const prov = p || provider;
-      if (!prov || typeof prov.request !== "function") {
+  const refreshEffectiveChainId = useCallback(
+    async (p, fallback) => {
+      try {
+        const prov = p || provider;
+        if (!prov || typeof prov.request !== "function") {
+          setEffectiveChainId(Number(fallback || 0));
+          return Number(fallback || 0);
+        }
+
+        // some wallets won’t answer chainId until accounts are authorized
+        let hex = null;
+        try {
+          hex = await withTimeout(
+            prov.request({ method: "eth_chainId" }),
+            10_000,
+            "eth_chainId timeout"
+          );
+        } catch {}
+
+        const cid = hexToDecChainId(hex);
+        const finalId = Number(cid || fallback || 0);
+        setEffectiveChainId(finalId);
+        return finalId;
+      } catch {
         setEffectiveChainId(Number(fallback || 0));
         return Number(fallback || 0);
       }
-      const hex = await prov.request({ method: "eth_chainId" });
-      const cid = hexToDecChainId(hex);
-      setEffectiveChainId(Number(cid || fallback || 0));
-      return Number(cid || fallback || 0);
-    } catch {
-      setEffectiveChainId(Number(fallback || 0));
-      return Number(fallback || 0);
-    }
-  }, [provider]);
+    },
+    [provider]
+  );
 
-  const setAdapterProviderFromConnector = useCallback(async (c) => {
+  // ✅ Force authorization if wallet is “connected” but not permitted yet
+  const ensureProviderAuthorized = useCallback(async (p) => {
+    const prov = p;
+    if (!prov?.request) return;
+
+    // If eth_accounts is empty, request accounts (this fixes “not authorized” on many mobile wallets)
     try {
-      if (!c) {
+      const accts = await withTimeout(
+        prov.request({ method: "eth_accounts" }),
+        10_000,
+        "eth_accounts timeout"
+      );
+
+      if (Array.isArray(accts) && accts.length > 0) return;
+
+      await withTimeout(
+        prov.request({ method: "eth_requestAccounts" }),
+        20_000,
+        isMobileish()
+          ? "Wallet did not respond to eth_requestAccounts (mobile). Open the wallet app/browser and try again."
+          : "Wallet did not respond to eth_requestAccounts."
+      );
+    } catch {
+      // don’t hard-fail here; some connectors handle it internally
+    }
+  }, []);
+
+  const setAdapterProviderFromConnector = useCallback(
+    async (c) => {
+      try {
+        if (!c) {
+          blockswapAdapter.setProvider(null);
+          setProvider(null);
+          setEffectiveChainId(0);
+          return;
+        }
+
+        const p = await c.getProvider?.();
+        blockswapAdapter.setProvider(p || null);
+        setProvider(p || null);
+
+        // ✅ new: ensure provider is authorized (fixes Trust/Coinbase “not authorized”)
+        await ensureProviderAuthorized(p || null);
+
+        // refresh chainId from provider
+        await refreshEffectiveChainId(p || null, wagmiChainId || 0);
+      } catch (e) {
+        console.warn("Failed to get provider from connector:", e?.message || e);
         blockswapAdapter.setProvider(null);
         setProvider(null);
         setEffectiveChainId(0);
-        return;
       }
-      const p = await c.getProvider?.();
-      blockswapAdapter.setProvider(p || null);
-      setProvider(p || null);
-
-      // immediately refresh chainId from provider
-      await refreshEffectiveChainId(p || null, wagmiChainId || 0);
-    } catch (e) {
-      console.warn("Failed to get provider from connector:", e?.message || e);
-      blockswapAdapter.setProvider(null);
-      setProvider(null);
-      setEffectiveChainId(0);
-    }
-  }, [refreshEffectiveChainId, wagmiChainId]);
+    },
+    [ensureProviderAuthorized, refreshEffectiveChainId, wagmiChainId]
+  );
 
   // ✅ keep provider in sync with wagmi active connector (including on refresh)
   useEffect(() => {
@@ -171,7 +227,7 @@ export function WalletProvider({ children }) {
     setAdapterProviderFromConnector(connector).catch(() => {});
   }, [isConnected, connector, setAdapterProviderFromConnector]);
 
-  // ✅ subscribe to chainChanged if wallet provides it
+  // ✅ subscribe to chainChanged / accountsChanged if wallet provides it
   useEffect(() => {
     const p = provider;
     if (!p || typeof p.on !== "function" || typeof p.removeListener !== "function") return;
@@ -181,16 +237,23 @@ export function WalletProvider({ children }) {
       setEffectiveChainId(Number(cid || 0));
     };
 
+    const onAccountsChanged = () => {
+      // refresh chainId too (some wallets update both)
+      refreshEffectiveChainId(p, wagmiChainId || 0).catch(() => {});
+    };
+
     try {
       p.on("chainChanged", onChainChanged);
+      p.on("accountsChanged", onAccountsChanged);
     } catch {}
 
-    // also refresh once (some wallets don’t emit immediately)
+    // refresh once
     refreshEffectiveChainId(p, wagmiChainId || 0).catch(() => {});
 
     return () => {
       try {
         p.removeListener("chainChanged", onChainChanged);
+        p.removeListener("accountsChanged", onAccountsChanged);
       } catch {}
     };
   }, [provider, wagmiChainId, refreshEffectiveChainId]);
@@ -221,13 +284,13 @@ export function WalletProvider({ children }) {
       connectInFlightRef.current = true;
 
       try {
-        // ✅ IMPORTANT FOR MOBILE: pass chainId hint
+        // ✅ mobile: give chainId hint
         const res = await connectAsync({ connector: c, chainId: TARGET_CHAIN_ID });
 
-        // sync adapter provider
+        // sync adapter provider (and force authorization)
         await setAdapterProviderFromConnector(c);
 
-        // ✅ If user chose WalletConnect, make sure we didn't accidentally end up with injected provider
+        // ✅ If user chose WalletConnect, make sure we didn't accidentally end up injected
         if (enforceWalletConnect) {
           const p = await c.getProvider?.().catch(() => null);
 
@@ -312,20 +375,18 @@ export function WalletProvider({ children }) {
       const target = Number(targetChainId || 0);
       if (!target) return;
 
-      // quick success path (provider truth)
+      // provider truth
       const current = await refreshEffectiveChainId(provider, wagmiChainId || 0);
       if (Number(current || 0) === target) return;
 
-      // wagmi switch (preferred)
+      // wagmi switch
       if (switchChainAsync) {
         try {
           await switchChainAsync({ chainId: target });
-        } catch (e) {
-          // fall through to direct request
-        }
+        } catch (e) {}
       }
 
-      // direct request fallback (helps Trust/Coinbase/WC)
+      // direct request fallback
       try {
         const p = provider;
         if (p && typeof p.request === "function") {
@@ -334,9 +395,7 @@ export function WalletProvider({ children }) {
             params: [{ chainId: "0x" + target.toString(16) }],
           });
         }
-      } catch (e) {
-        // don't throw yet; re-check and throw if still wrong
-      }
+      } catch (e) {}
 
       const after = await refreshEffectiveChainId(provider, wagmiChainId || 0);
       if (Number(after || 0) !== target) {
@@ -402,10 +461,10 @@ export function WalletProvider({ children }) {
       walletAddress: address,
       isConnected,
 
-      // wagmi view (may be stale on some mobile wallets)
+      // wagmi view (may be stale)
       chainId: Number(wagmiChainId || 0),
 
-      // ✅ provider-truth view
+      // ✅ provider truth
       effectiveChainId: Number(effectiveChainId || 0),
       effectiveWrongChain,
 
@@ -426,6 +485,7 @@ export function WalletProvider({ children }) {
       connectError: error?.message || null,
       availableConnectors,
 
+      // ✅ expose target chain so button/pages don’t re-derive it differently
       targetChainId: TARGET_CHAIN_ID,
     }),
     [
