@@ -67,7 +67,8 @@ function useIsMobileish() {
 }
 
 export default function WalletConnectButton({
-  targetChainId = Number(import.meta.env.VITE_CHAIN_ID || 84532),
+  // ✅ SAFETY: default to Base MAINNET if env missing
+  targetChainId = Number(import.meta.env.VITE_CHAIN_ID || 8453),
   size = "sm", // "sm" | "md"
   label = "Connect Wallet",
   onToast,
@@ -77,14 +78,20 @@ export default function WalletConnectButton({
   const {
     walletAddress,
     isConnected,
+
+    // wagmi view (can be stale)
     chainId,
+
+    // ✅ provider-truth view
+    effectiveChainId,
+
     ensureChain,
     connectMetaMask,
     connectCoinbase,
     connectWalletConnect,
     disconnectWallet,
     availableConnectors,
-    hardResetConnection, // ✅ added in WalletContext update
+    hardResetConnection,
   } = useWallet();
 
   const {
@@ -111,11 +118,14 @@ export default function WalletConnectButton({
     if (typeof onError === "function") onError(m);
   };
 
+  // ✅ Use provider-truth chainId whenever possible
+  const currentChainId = Number(effectiveChainId || chainId || 0);
+
   const wrongChain =
     isConnected &&
     Number(targetChainId) > 0 &&
-    Number(chainId || 0) > 0 &&
-    Number(chainId) !== Number(targetChainId);
+    Number(currentChainId || 0) > 0 &&
+    Number(currentChainId) !== Number(targetChainId);
 
   const hasNickname = useMemo(() => String(nickname || "").trim().length > 0, [nickname]);
 
@@ -136,7 +146,6 @@ export default function WalletConnectButton({
   });
 
   // ✅ Close on outside click ONLY while open.
-  // Uses composedPath so portals count as inside.
   useEffect(() => {
     if (!open) return;
 
@@ -167,21 +176,18 @@ export default function WalletConnectButton({
     };
   }, [open, debug]);
 
-  // ✅ If mobile/desktop mode changes while open, close
   useEffect(() => {
     if (!open) return;
     setOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
 
-  // ✅ If connect state changes while menu open, close (prevents weird stuck UI)
   useEffect(() => {
     if (!open) return;
     setOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected]);
 
-  // ✅ Lock page scroll ONLY while mobile sheet open
   useEffect(() => {
     if (!isMobile || !open) return;
     const prev = document.body.style.overflow;
@@ -240,14 +246,10 @@ export default function WalletConnectButton({
 
   const canSetNickname = isConnected && !hasNickname && !hasOnchainNickname;
 
-  // =========================
-  // MOBILE SHEET (portal)
-  // =========================
   const mobileSheet =
     open && isMobile && typeof document !== "undefined"
       ? createPortal(
           <>
-            {/* Backdrop: ALWAYS CLOSE */}
             <div
               className="fixed inset-0 z-[9998] bg-black/55"
               onClick={(e) => {
@@ -257,7 +259,6 @@ export default function WalletConnectButton({
               }}
             />
 
-            {/* Sheet */}
             <div
               ref={sheetRef}
               className="fixed left-0 right-0 bottom-0 z-[9999] rounded-t-2xl border border-slate-800 bg-slate-950 shadow-2xl"
@@ -375,7 +376,6 @@ export default function WalletConnectButton({
                       </button>
                     ) : null}
 
-                    {/* ✅ Mobile escape hatch */}
                     {typeof hardResetConnection === "function" ? (
                       <button
                         type="button"
@@ -422,9 +422,6 @@ export default function WalletConnectButton({
         )
       : null;
 
-  // =========================
-  // DESKTOP DROPDOWN
-  // =========================
   const desktopDropdown =
     open && !isMobile ? (
       <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-xl">
