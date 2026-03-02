@@ -73,7 +73,7 @@ function withTimeout(promise, ms, message) {
   const timeout = new Promise((_, reject) => {
     t = setTimeout(() => reject(new Error(message)), ms);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(t));
 }
 
 function toChainId(v) {
@@ -182,7 +182,7 @@ async function getWalletChainId(provider) {
  *   deadline,
  *   address(this),
  *   chainid
- * ))
+ *  ))
  */
 function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
   const tag = keccak256(toBytes("NICKNAME_SET"));
@@ -197,7 +197,7 @@ function nicknameMsgHash({ user, nick, nonce, deadline, registry, chainId }) {
 }
 
 // -------------------------------
-// Signature normalization
+// Signature normalization + LOW-S enforcement
 // -------------------------------
 function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
@@ -216,15 +216,22 @@ function extractHexSigFromAny(raw) {
     throw new Error("Signature missing/blocked (empty). Approve the wallet prompt and try again.");
   }
 
+  // accept 64/65/66 bytes encoded as 0x + hex
   if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
 
+  // 66-byte (0x + 132 hex) => length 134 chars
   const m66 = s.match(/0x[0-9a-fA-F]{132}/);
   if (m66?.[0]) return m66[0];
+
+  // 65-byte (0x + 130 hex) => length 132 chars
   const m65 = s.match(/0x[0-9a-fA-F]{130}/);
   if (m65?.[0]) return m65[0];
+
+  // 64-byte (0x + 128 hex) => length 130 chars
   const m64 = s.match(/0x[0-9a-fA-F]{128}/);
   if (m64?.[0]) return m64[0];
 
+  // any longer; slice down
   const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
   if (mAny?.[0]) {
     const h = mAny[0];
@@ -243,7 +250,7 @@ function expandEip2098(sig64_hex) {
   const vs = s.slice(66);
 
   const vsFirstByte = parseInt(vs.slice(0, 2), 16);
-  const v = vsFirstByte & 0x80 ? 28 : 27;
+  const v = (vsFirstByte & 0x80) ? 28 : 27;
 
   const sFirstByte = (vsFirstByte & 0x7f).toString(16).padStart(2, "0");
   const sFixed = sFirstByte + vs.slice(2);
@@ -263,13 +270,63 @@ function shrink66To65(sig66) {
   return `0x${r}${s}${vHex}`;
 }
 
+function normalizeV(vRaw) {
+  const v = Number(vRaw);
+  if (!Number.isFinite(v)) return v;
+  if (v === 0 || v === 1) return v + 27;
+  if (v === 27 || v === 28) return v;
+  if (v > 28) return v % 2 === 0 ? 28 : 27;
+  return v;
+}
+
 function decode65(sig65) {
   const hex = sig65;
   const r = `0x${hex.slice(2, 66)}`;
   const s = `0x${hex.slice(66, 130)}`;
   const vRaw = parseInt(hex.slice(130, 132), 16);
-  const v = vRaw === 0 || vRaw === 1 ? vRaw + 27 : vRaw;
+  const v = normalizeV(vRaw);
   return { v: Number(v), r, s };
+}
+
+// secp256k1 curve order + half order (EIP-2)
+const SECP256K1_N =
+  0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const SECP256K1_HALF_N = SECP256K1_N / 2n;
+
+function pad32Hex(x) {
+  const h = x.toString(16).padStart(64, "0");
+  return `0x${h}`;
+}
+
+function rebuildSigHex({ r, s, v }) {
+  const rr = String(r).toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const ss = String(s).toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const vv = Number(v).toString(16).padStart(2, "0");
+  return `0x${rr}${ss}${vv}`;
+}
+
+function enforceLowS({ v, r, s }) {
+  // validate r/s
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(r))) throw new Error("Invalid signature r (not 32 bytes)");
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(s))) throw new Error("Invalid signature s (not 32 bytes)");
+
+  let vv = normalizeV(v);
+  if (vv !== 27 && vv !== 28) throw new Error(`Invalid signature v (${v})`);
+
+  let sBig = BigInt(String(s));
+  if (sBig === 0n) throw new Error("Invalid signature: s=0 (wallet returned broken signature)");
+  if (sBig >= SECP256K1_N) throw new Error("Invalid signature: s out of range");
+
+  // EIP-2: if s > n/2, flip to low-s and flip v parity
+  if (sBig > SECP256K1_HALF_N) {
+    sBig = SECP256K1_N - sBig;
+    vv = vv === 27 ? 28 : 27;
+  }
+
+  const sLow = pad32Hex(sBig);
+  const sig = rebuildSigHex({ r, s: sLow, v: vv });
+
+  return { signature: sig, v: vv, r: r.toLowerCase(), s: sLow.toLowerCase() };
 }
 
 function normalizeSigTo65(sigLike) {
@@ -277,41 +334,61 @@ function normalizeSigTo65(sigLike) {
   const hex = extracted.trim();
   const len = hex.length;
 
+  let decoded;
+
   if (len === 130) {
+    // 64-byte compact => expand to 65
     const sig65 = expandEip2098(hex);
-    const { v, r, s } = decode65(sig65);
-    return { signature: sig65, v, r, s };
-  }
-  if (len === 132) {
-    const { v, r, s } = decode65(hex);
-    return { signature: hex, v, r, s };
-  }
-  if (len === 134) {
+    decoded = decode65(sig65);
+  } else if (len === 132) {
+    // 65-byte standard
+    decoded = decode65(hex);
+  } else if (len === 134) {
+    // 66-byte weird => shrink to 65
     const sig65 = shrink66To65(hex);
-    const { v, r, s } = decode65(sig65);
-    return { signature: sig65, v, r, s };
+    decoded = decode65(sig65);
+  } else {
+    throw new Error(`Signature invalid length (${len}).`);
   }
 
-  throw new Error(`Signature invalid length (${len}).`);
+  // ✅ enforce non-zero + low-s + normalized v, rebuild signature
+  return enforceLowS(decoded);
 }
 
-// ✅ IMPORTANT: Coinbase/Base Wallet commonly blocks eth_sign.
-// Prefer personal_sign first; no eth_sign fallback.
+// ✅ IMPORTANT:
+// Prefer walletClient.signMessage({raw}) first (most reliable).
+// Fallback to personal_sign in both param orders.
+// NO eth_sign (blocked in Coinbase/Base Wallet).
 async function signRawHash({ provider, chain, account, msgHash }) {
   let lastErr = null;
 
-  // wake wallet / ensure account is authorized (helps mobile)
+  // wake / authorize (mobile helps)
   try {
     await withTimeout(
       provider.request({ method: "eth_requestAccounts", params: [] }),
-      12_000,
+      15_000,
       "Wallet did not respond. Open your wallet app and try again."
     );
   } catch (e) {
     lastErr = e;
   }
 
-  // preferred: personal_sign (both param orders)
+  // 1) best: viem signMessage raw (uses wallet's best path)
+  try {
+    const wc = createWalletClient({ chain, transport: custom(provider) });
+    const sig = await withTimeout(
+      wc.signMessage({ account, message: { raw: msgHash } }),
+      45_000,
+      isProbablyMobile()
+        ? "Signature timed out (mobile). Open the dapp inside your wallet browser (Base/Coinbase/MetaMask) and try again."
+        : "Signature timed out."
+    );
+    return extractHexSigFromAny(sig);
+  } catch (e0) {
+    lastErr = e0;
+  }
+
+  // 2) fallback: personal_sign (msgHash first)
   try {
     const sig = await withTimeout(
       provider.request({ method: "personal_sign", params: [msgHash, account] }),
@@ -323,40 +400,27 @@ async function signRawHash({ provider, chain, account, msgHash }) {
     return extractHexSigFromAny(sig);
   } catch (e1) {
     lastErr = e1;
-    try {
-      const sig = await withTimeout(
-        provider.request({ method: "personal_sign", params: [account, msgHash] }),
-        45_000,
-        isProbablyMobile()
-          ? "Signature timed out (mobile). Open the dapp inside your wallet browser and try again."
-          : "Signature timed out."
-      );
-      return extractHexSigFromAny(sig);
-    } catch (e2) {
-      lastErr = e2;
-    }
   }
 
-  // fallback: viem signMessage (only after personal_sign)
+  // 3) fallback: personal_sign (account first)
   try {
-    const wc = createWalletClient({ chain, transport: custom(provider) });
     const sig = await withTimeout(
-      wc.signMessage({ account, message: { raw: msgHash } }),
+      provider.request({ method: "personal_sign", params: [account, msgHash] }),
       45_000,
       isProbablyMobile()
         ? "Signature timed out (mobile). Open the dapp inside your wallet browser and try again."
         : "Signature timed out."
     );
     return extractHexSigFromAny(sig);
-  } catch (e3) {
-    lastErr = e3;
+  } catch (e2) {
+    lastErr = e2;
   }
 
-  const base = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
+  const baseMsg = lastErr?.shortMessage || lastErr?.message || "Signing failed/was blocked.";
 
   throw new Error(
-    `${base}\n\nCoinbase/Base Wallet note: eth_sign is commonly blocked.\n` +
-      `Fix: use the wallet’s in-app browser or WalletConnect.`
+    `${baseMsg}\n\nWallet note: Base/Coinbase wallet can fail signing when opened via phone browser deep-link.\n` +
+      `Fix: open your site INSIDE the wallet’s in-app browser, or use WalletConnect.`
   );
 }
 
@@ -489,6 +553,7 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
     msgHash: prep.msgHash,
   });
 
+  // ✅ now returns a fully normalized (low-s) signature + v/r/s
   const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
   dlog("normalized", { sigLen: signature?.length, v, r, s });
 
