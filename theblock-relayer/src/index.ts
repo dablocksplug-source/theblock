@@ -10,6 +10,15 @@ import {
   isAddress,
   parseAbiItem,
   signatureToHex,
+  // ✅ NEW: debug signature verification helpers
+  keccak256,
+  encodeAbiParameters,
+  parseAbiParameters,
+  toHex,
+  toBytes,
+  hashMessage,
+  recoverAddress,
+  getAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
@@ -59,6 +68,15 @@ const ADMIN_KEY = (ENV.ADMIN_KEY || "").trim();
 // NEW: allow Vercel previews only when explicitly enabled
 const ALLOW_VERCEL_PREVIEWS = String(ENV.ALLOW_VERCEL_PREVIEWS || "0") === "1";
 
+// ✅ optional: return verbose signature debug info (don’t leave ON forever)
+const DEBUG_SIG = String(ENV.DEBUG_SIG || "1") === "1";
+
+function mustChecksumAddress(a: string, label: string): `0x${string}` {
+  const s = String(a || "").trim();
+  if (!isAddress(s)) throw new Error(`Invalid ${label} address`);
+  return getAddress(s) as `0x${string}`;
+}
+
 if (!RPC_URL) throw new Error("Missing RPC_URL");
 if (!RELAYER_PRIVATE_KEY) throw new Error("Missing RELAYER_PRIVATE_KEY");
 if (!BLOCKSWAP_ADDRESS || !isAddress(BLOCKSWAP_ADDRESS)) {
@@ -67,6 +85,10 @@ if (!BLOCKSWAP_ADDRESS || !isAddress(BLOCKSWAP_ADDRESS)) {
 if (NICKNAME_REGISTRY_ADDRESS && !isAddress(NICKNAME_REGISTRY_ADDRESS)) {
   throw new Error("Invalid NICKNAME_REGISTRY_ADDRESS");
 }
+
+// ✅ normalize addresses immediately (prevents subtle checksum / casing issues)
+const BLOCKSWAP_ADDR = mustChecksumAddress(BLOCKSWAP_ADDRESS, "BLOCKSWAP_ADDRESS");
+const NICKNAME_ADDR = NICKNAME_REGISTRY_ADDRESS ? mustChecksumAddress(NICKNAME_REGISTRY_ADDRESS, "NICKNAME_REGISTRY_ADDRESS") : "";
 
 const chain = CHAIN_ID === base.id ? base : baseSepolia;
 const account = privateKeyToAccount(RELAYER_PRIVATE_KEY);
@@ -118,6 +140,14 @@ const NICKNAME_MIN_ABI = [
       { name: "s", type: "bytes32" },
     ],
     outputs: [],
+  },
+  // ✅ NEW: for debug hash reconstruction
+  {
+    type: "function",
+    name: "nonces",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ type: "uint256" }],
   },
 ] as const;
 
@@ -200,7 +230,6 @@ app.use((req, res, next) => {
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
-  // APIs generally shouldn't be cached by shared caches
   res.setHeader("Cache-Control", "no-store");
   next();
 });
@@ -238,10 +267,8 @@ function isAllowedOrigin(origin: string | undefined | null) {
   return false;
 }
 
-// CORS is only meaningful for browsers; we still keep it correct.
 const corsOptions: cors.CorsOptions = {
   origin(origin, cb) {
-    // If no Origin header, don't set CORS headers. (curl/uptime checks won't care.)
     if (!origin) return cb(null, false);
     if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error(`CORS blocked for origin: ${origin}`));
@@ -265,8 +292,6 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   return next(err);
 });
 
-// Enforce Origin on sensitive endpoints (real blocking)
-// Note: Origin can be spoofed by non-browsers, but this blocks casual cross-site and mistakes.
 function requireAllowedOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
   const origin = String(req.headers.origin || "").trim();
   if (!origin || !isAllowedOrigin(origin)) {
@@ -342,14 +367,11 @@ const BuySchema = z.object({
 const BuyPermitSchema = z.object({
   user: zAnyString,
   ozWei: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
-
-
   buyDeadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
   buyV: zAnyOptionalNumber,
   buyR: zAnyOptionalString,
   buyS: zAnyOptionalString,
   buySignature: z.preprocess((v) => (v == null ? undefined : String(v)), z.string().optional()),
-
   permitValue: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number(), z.bigint()])),
   permitDeadline: z.preprocess((v) => (v == null ? v : String(v)), z.union([z.string(), z.number()])),
   permitV: zAnyOptionalNumber,
@@ -362,8 +384,7 @@ const BuyPermitSchema = z.object({
 // helpers
 // --------------------
 function mustAddress(a: string, label: string): `0x${string}` {
-  if (!isAddress(a)) throw new Error(`Invalid ${label} address`);
-  return a as `0x${string}`;
+  return mustChecksumAddress(a, label);
 }
 function mustUintSeconds(v: string | number, label: string): bigint {
   const n = BigInt(String(v));
@@ -418,10 +439,6 @@ function toIntStringSafe(v: any): string {
 // --------------------
 // signature parsing (ACCEPT v/r/s OR signature string)
 // --------------------
-function isHexOnly(s: any) {
-  return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
-}
-
 function extractHexSigFromAny(raw: any): string {
   if (raw && typeof raw === "object") {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
@@ -436,15 +453,15 @@ function extractHexSigFromAny(raw: any): string {
     if (r && s && (v != null || yParity != null)) {
       const vNum = v != null ? normalizeV(Number(v)) : undefined;
 
-      // yParity must be 0 or 1
       const yParityNum =
         yParity != null
           ? Number(yParity)
           : vNum != null
-            ? (vNum === 28 ? 1 : 0)
+            ? vNum === 28
+              ? 1
+              : 0
             : 0;
 
-      // viem expects v as bigint (when provided)
       const hex = signatureToHex({
         r: r as `0x${string}`,
         s: s as `0x${string}`,
@@ -461,26 +478,16 @@ function extractHexSigFromAny(raw: any): string {
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
-  if (isHexOnly(s) && (s.length === 130 || s.length === 132 || s.length === 134)) return s;
-
-  const m66 = s.match(/0x[0-9a-fA-F]{132}/);
-  if (m66?.[0]) return m66[0];
-
-  const m65 = s.match(/0x[0-9a-fA-F]{130}/);
-  if (m65?.[0]) return m65[0];
-
-  const m64 = s.match(/0x[0-9a-fA-F]{128}/);
-  if (m64?.[0]) return m64[0];
-
   const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
   if (mAny?.[0]) {
     const h = mAny[0];
-    if (h.length >= 134) return h.slice(0, 134);
+    // prefer full 65-byte (0x + 130 hex) => length 132
     if (h.length >= 132) return h.slice(0, 132);
+    // compact 64-byte (0x + 128 hex) => length 130
     if (h.length >= 130) return h.slice(0, 130);
   }
 
-  throw new Error(`Signature invalid. Could not extract 64/65/66-byte hex signature (len=${s.length}).`);
+  throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
 }
 
 function decodeEip2098(sig64: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
@@ -510,17 +517,6 @@ function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
-function decode66(sig66: string): { v: number; r: `0x${string}`; s: `0x${string}` } {
-  const hex = String(sig66 || "").trim();
-  if (!/^0x[0-9a-fA-F]{132}$/.test(hex)) throw new Error("Invalid 66-byte signature");
-
-  const r = ("0x" + hex.slice(2, 66)) as `0x${string}`;
-  const s = ("0x" + hex.slice(66, 130)) as `0x${string}`;
-  const vRaw = parseInt(hex.slice(132, 134), 16);
-  const v = normalizeV(vRaw);
-  return { v, r, s };
-}
-
 function parseSig(body: any, prefix?: "buy" | "permit") {
   const vKey = prefix ? `${prefix}V` : "v";
   const rKey = prefix ? `${prefix}R` : "r";
@@ -541,29 +537,23 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
     return { v: vNum, r, s };
   }
 
-  // Otherwise signature hex string / object
   const sigLike = body?.[sigKey];
   const sigHex = sigLike != null ? extractHexSigFromAny(sigLike) : "";
 
   if (!sigHex || sigHex === "0x") {
     throw new Error(`${sigKey}: Signature missing/blocked (empty). Approve the signature prompt in the wallet and try again.`);
   }
-  if (!sigHex.startsWith("0x")) throw new Error(`Invalid ${sigKey}: must start with 0x`);
-  if (!/^0x[0-9a-fA-F]+$/.test(sigHex)) throw new Error(`Invalid ${sigKey}: not hex`);
 
-  // compact / normal / weird
+  // compact / normal
   if (/^0x[0-9a-fA-F]{128}$/.test(sigHex)) return decodeEip2098(sigHex);
   if (/^0x[0-9a-fA-F]{130}$/.test(sigHex)) return decode65(sigHex);
-  if (/^0x[0-9a-fA-F]{132}$/.test(sigHex)) return decode66(sigHex);
 
-  throw new Error(
-    `Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130/132/134 total (0x + 128/130/132 hex).`
-  );
+  throw new Error(`Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130 or 132 total.`);
 }
 
 async function requireRelayerMatches() {
   const onchainRelayer = await publicClient.readContract({
-    address: BLOCKSWAP_ADDRESS,
+    address: BLOCKSWAP_ADDR,
     abi: BLOCKSWAP_MIN_ABI,
     functionName: "relayer",
   });
@@ -579,11 +569,75 @@ async function withTimeout<T>(p: PromiseLike<T> | T, ms: number, code = "timeout
   });
 
   try {
-    // Promise.resolve converts Postgrest builder (thenable) into a real Promise
     return await Promise.race([Promise.resolve(p), timeout]);
   } finally {
     clearTimeout(t);
   }
+}
+
+// --------------------
+// ✅ DEBUG: reconstruct expected message hashes and recover signer
+// --------------------
+function buildBuyRelayedMsgHash(args: {
+  buyer: `0x${string}`;
+  ozWei: bigint;
+  nonce: bigint;
+  deadline: bigint;
+  swapAddress: `0x${string}`;
+  chainId: number;
+}) {
+  // MUST match UI + Solidity
+  const TAG = keccak256(toHex("BLOCKSWAP_BUY_OZ"));
+  return keccak256(
+    encodeAbiParameters(
+      parseAbiParameters("bytes32,address,uint256,uint256,uint256,address,uint256"),
+      [TAG, args.buyer, args.ozWei, args.nonce, args.deadline, args.swapAddress, BigInt(args.chainId)]
+    )
+  );
+}
+
+function buildNicknameMsgHash(args: {
+  user: `0x${string}`;
+  nick: string;
+  nonce: bigint;
+  deadline: bigint;
+  registry: `0x${string}`;
+  chainId: number;
+}) {
+  // MUST match UI + Solidity
+  const tag = keccak256(toBytes("NICKNAME_SET"));
+  const nickHash = keccak256(toBytes(String(args.nick || "")));
+  return keccak256(
+    encodeAbiParameters(
+      parseAbiParameters("bytes32,address,bytes32,uint256,uint256,address,uint256"),
+      [tag, args.user, nickHash, args.nonce, args.deadline, args.registry, BigInt(args.chainId)]
+    )
+  );
+}
+
+function sigToHex65(v: number, r: `0x${string}`, s: `0x${string}`): `0x${string}` {
+  const vv = normalizeV(Number(v));
+  const vHex = vv.toString(16).padStart(2, "0");
+  const rr = String(r).toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const ss = String(s).toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  return (`0x${rr}${ss}${vHex}`) as `0x${string}`;
+}
+
+async function recoverFromSig({
+  msgHash,
+  v,
+  r,
+  s,
+}: {
+  msgHash: `0x${string}`;
+  v: number;
+  r: `0x${string}`;
+  s: `0x${string}`;
+}): Promise<`0x${string}`> {
+  // Wallets sign as personal_sign / signMessage => EIP-191 prefixed hash
+  const sigHex = sigToHex65(v, r, s);
+  const ethSignedHash = hashMessage({ raw: msgHash });
+  return recoverAddress({ hash: ethSignedHash, signature: sigHex });
 }
 
 // --------------------
@@ -631,7 +685,7 @@ async function supaUpsertHolderDelta(params: { wallet: string; ozWeiDelta: bigin
         .from("blockswap_holders")
         .select("oz_wei")
         .eq("chain_id", CHAIN_ID)
-        .eq("contract", lower(BLOCKSWAP_ADDRESS))
+        .eq("contract", lower(BLOCKSWAP_ADDR))
         .eq("wallet", wallet)
         .maybeSingle(),
       SUPABASE_REQ_TIMEOUT_MS,
@@ -655,7 +709,7 @@ async function supaUpsertHolderDelta(params: { wallet: string; ozWeiDelta: bigin
         .upsert(
           {
             chain_id: CHAIN_ID,
-            contract: lower(BLOCKSWAP_ADDRESS),
+            contract: lower(BLOCKSWAP_ADDR),
             wallet,
             oz_wei: next.toString(),
             updated_at: new Date().toISOString(),
@@ -689,7 +743,7 @@ async function initSyncCursorFromDb() {
       .from("blockswap_events")
       .select("block_number")
       .eq("chain_id", CHAIN_ID)
-      .eq("contract", lower(BLOCKSWAP_ADDRESS))
+      .eq("contract", lower(BLOCKSWAP_ADDR))
       .order("block_number", { ascending: false })
       .limit(1);
 
@@ -732,8 +786,8 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
       const end = cursor + CHUNK - 1n <= toBlock ? cursor + CHUNK - 1n : toBlock;
 
       const [bought, sold] = await Promise.all([
-        logsClient.getLogs({ address: BLOCKSWAP_ADDRESS, event: EVT_BOUGHT, fromBlock: cursor, toBlock: end }),
-        logsClient.getLogs({ address: BLOCKSWAP_ADDRESS, event: EVT_SOLD, fromBlock: cursor, toBlock: end }),
+        logsClient.getLogs({ address: BLOCKSWAP_ADDR, event: EVT_BOUGHT, fromBlock: cursor, toBlock: end }),
+        logsClient.getLogs({ address: BLOCKSWAP_ADDR, event: EVT_SOLD, fromBlock: cursor, toBlock: end }),
       ]);
 
       for (const l of bought || []) {
@@ -743,7 +797,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
 
         const didInsert = await supaInsertEvent({
           chain_id: CHAIN_ID,
-          contract: lower(BLOCKSWAP_ADDRESS),
+          contract: lower(BLOCKSWAP_ADDR),
           event_type: "BUY",
           wallet: lower(buyer),
           oz_wei: ozWei.toString(),
@@ -768,7 +822,7 @@ async function syncFromChain({ lookbackBlocks }: { lookbackBlocks: number }) {
 
         const didInsert = await supaInsertEvent({
           chain_id: CHAIN_ID,
-          contract: lower(BLOCKSWAP_ADDRESS),
+          contract: lower(BLOCKSWAP_ADDR),
           event_type: "SELLBACK",
           wallet: lower(seller),
           oz_wei: ozWei.toString(),
@@ -825,7 +879,7 @@ app.get("/health", async (_req, res) => {
 
   try {
     relayerOnchain = await publicClient.readContract({
-      address: BLOCKSWAP_ADDRESS,
+      address: BLOCKSWAP_ADDR,
       abi: BLOCKSWAP_MIN_ABI,
       functionName: "relayer",
     });
@@ -834,7 +888,7 @@ app.get("/health", async (_req, res) => {
 
   try {
     usdcOnchain = await publicClient.readContract({
-      address: BLOCKSWAP_ADDRESS,
+      address: BLOCKSWAP_ADDR,
       abi: BLOCKSWAP_MIN_ABI,
       functionName: "USDC",
     });
@@ -847,11 +901,12 @@ app.get("/health", async (_req, res) => {
     relayerWallet: account.address,
     rpc: RPC_URL ? "set" : "missing",
     rpcLogs: (RPC_URL_LOGS || RPC_URL) ? "set" : "missing",
-    blockswap: BLOCKSWAP_ADDRESS,
+    blockswap: BLOCKSWAP_ADDR,
     onchainRelayer: relayerOnchain,
     relayerMatches,
     onchainUSDC: usdcOnchain,
     supabase: hasSupabase() ? "ON" : "OFF",
+    debugSig: DEBUG_SIG ? "ON" : "OFF",
     sync: {
       enabled: ENABLE_CHAIN_SYNC,
       everyMs: SYNC_EVERY_MS,
@@ -871,7 +926,8 @@ app.get("/health", async (_req, res) => {
 // FEED endpoints (public; still rate-limited lightly)
 app.get("/feed/activity", async (req, res) => {
   try {
-    if (!hit(rateKey(req, "feed_activity"), 60, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "feed_activity"), 60, 10_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const limit = Math.max(1, Math.min(100, Number(req.query.limit || FEED_LIMIT_DEFAULT)));
     if (!supabase) return sendJson(res, { ok: false, error: "Supabase not configured" }, 400);
@@ -880,7 +936,7 @@ app.get("/feed/activity", async (req, res) => {
       .from("blockswap_events")
       .select("event_type,wallet,oz_wei,usdc_6,block_number,tx_hash,created_at")
       .eq("chain_id", CHAIN_ID)
-      .eq("contract", lower(BLOCKSWAP_ADDRESS))
+      .eq("contract", lower(BLOCKSWAP_ADDR))
       .order("block_number", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(limit);
@@ -903,7 +959,8 @@ app.get("/feed/activity", async (req, res) => {
 
 app.get("/feed/holders", async (req, res) => {
   try {
-    if (!hit(rateKey(req, "feed_holders"), 40, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "feed_holders"), 40, 10_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || HOLDERS_LIMIT_DEFAULT)));
     if (!supabase) return sendJson(res, { ok: false, error: "Supabase not configured" }, 400);
@@ -912,7 +969,7 @@ app.get("/feed/holders", async (req, res) => {
       .from("blockswap_holders")
       .select("wallet,oz_wei,updated_at")
       .eq("chain_id", CHAIN_ID)
-      .eq("contract", lower(BLOCKSWAP_ADDRESS))
+      .eq("contract", lower(BLOCKSWAP_ADDR))
       .order("oz_wei", { ascending: false })
       .limit(limit);
 
@@ -935,12 +992,10 @@ app.get("/feed/holders", async (req, res) => {
 app.post("/admin/sync-now", requireAllowedOrigin, async (req, res) => {
   try {
     if (!ENABLE_CHAIN_SYNC) return sendJson(res, { ok: false, error: "sync_disabled" }, 400);
-
-    // If no ADMIN_KEY, hide endpoint
     if (!ADMIN_KEY) return sendJson(res, { ok: false, error: "not_found" }, 404);
 
-    // Rate-limit admin calls
-    if (!hit(rateKey(req, "admin_sync"), 10, 60_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "admin_sync"), 10, 60_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const key = String(req.headers["x-admin-key"] || "").trim();
     if (!key || key !== ADMIN_KEY) return sendJson(res, { ok: false, error: "unauthorized" }, 401);
@@ -957,13 +1012,13 @@ app.post("/admin/sync-now", requireAllowedOrigin, async (req, res) => {
 // --------------------
 app.post("/relay/nickname", requireAllowedOrigin, async (req, res) => {
   try {
-    if (!hit(rateKey(req, "relay_nickname"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_nickname"), 20, 10_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
-    if (!NICKNAME_REGISTRY_ADDRESS || !isAddress(NICKNAME_REGISTRY_ADDRESS)) {
+    if (!NICKNAME_ADDR || !isAddress(NICKNAME_ADDR)) {
       throw new Error("Relayer missing/invalid NICKNAME_REGISTRY_ADDRESS");
     }
 
-    // ✅ accept older client keys (wallet/nickname)
     const rawIn = req.body && typeof req.body === "object" ? req.body : {};
     const merged = {
       ...rawIn,
@@ -982,8 +1037,52 @@ app.post("/relay/nickname", requireAllowedOrigin, async (req, res) => {
 
     const { v, r, s } = parseSig(body);
 
+    // ✅ DEBUG verify recovered signer matches user
+    if (DEBUG_SIG) {
+      const chainIdRpc = await publicClient.getChainId().catch(() => CHAIN_ID);
+      const nonce = await publicClient.readContract({
+        address: NICKNAME_ADDR as `0x${string}`,
+        abi: NICKNAME_MIN_ABI,
+        functionName: "nonces",
+        args: [user],
+      });
+
+      const msgHash = buildNicknameMsgHash({
+        user,
+        nick,
+        nonce: BigInt(nonce as any),
+        deadline,
+        registry: NICKNAME_ADDR as `0x${string}`,
+        chainId: Number(chainIdRpc),
+      });
+
+      const recovered = await recoverFromSig({ msgHash, v, r, s });
+      const ok = recovered.toLowerCase() === user.toLowerCase();
+
+      if (!ok) {
+        return sendJson(
+          res,
+          {
+            ok: false,
+            error: "signature_mismatch",
+            debug: {
+              kind: "nickname",
+              user,
+              recovered,
+              chainIdRpc: Number(chainIdRpc),
+              registry: NICKNAME_ADDR,
+              nonce: String(nonce),
+              deadline: deadline.toString(),
+              msgHash,
+            },
+          },
+          400
+        );
+      }
+    }
+
     const hash = await walletClient.writeContract({
-      address: NICKNAME_REGISTRY_ADDRESS as `0x${string}`,
+      address: NICKNAME_ADDR as `0x${string}`,
       abi: NICKNAME_MIN_ABI,
       functionName: "setNicknameRelayed",
       args: [user, nick, deadline, v, r, s],
@@ -998,7 +1097,8 @@ app.post("/relay/nickname", requireAllowedOrigin, async (req, res) => {
 
 app.post("/relay/buy", requireAllowedOrigin, async (req, res) => {
   try {
-    if (!hit(rateKey(req, "relay_buy"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_buy"), 20, 10_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const body = BuySchema.parse(req.body);
 
@@ -1011,8 +1111,50 @@ app.post("/relay/buy", requireAllowedOrigin, async (req, res) => {
 
     const { v, r, s } = parseSig(body);
 
+    if (DEBUG_SIG) {
+      const chainIdRpc = await publicClient.getChainId().catch(() => CHAIN_ID);
+      const nonce = await publicClient.readContract({
+        address: BLOCKSWAP_ADDR,
+        abi: BLOCKSWAP_MIN_ABI,
+        functionName: "nonces",
+        args: [user],
+      });
+
+      const msgHash = buildBuyRelayedMsgHash({
+        buyer: user,
+        ozWei,
+        nonce: BigInt(nonce as any),
+        deadline,
+        swapAddress: BLOCKSWAP_ADDR,
+        chainId: Number(chainIdRpc),
+      });
+
+      const recovered = await recoverFromSig({ msgHash, v, r, s });
+      const ok = recovered.toLowerCase() === user.toLowerCase();
+      if (!ok) {
+        return sendJson(
+          res,
+          {
+            ok: false,
+            error: "signature_mismatch",
+            debug: {
+              kind: "buy",
+              user,
+              recovered,
+              chainIdRpc: Number(chainIdRpc),
+              swap: BLOCKSWAP_ADDR,
+              nonce: String(nonce),
+              deadline: deadline.toString(),
+              msgHash,
+            },
+          },
+          400
+        );
+      }
+    }
+
     const hash = await walletClient.writeContract({
-      address: BLOCKSWAP_ADDRESS,
+      address: BLOCKSWAP_ADDR,
       abi: BLOCKSWAP_MIN_ABI,
       functionName: "buyOzRelayed",
       args: [user, ozWei, deadline, v, r, s],
@@ -1031,7 +1173,8 @@ app.post("/relay/buy", requireAllowedOrigin, async (req, res) => {
 
 app.post("/relay/buy-permit", requireAllowedOrigin, async (req, res) => {
   try {
-    if (!hit(rateKey(req, "relay_buy_permit"), 20, 10_000)) return sendJson(res, { ok: false, error: "Rate limited" }, 429);
+    if (!hit(rateKey(req, "relay_buy_permit"), 20, 10_000))
+      return sendJson(res, { ok: false, error: "Rate limited" }, 429);
 
     const body = BuyPermitSchema.parse(req.body);
 
@@ -1051,8 +1194,52 @@ app.post("/relay/buy-permit", requireAllowedOrigin, async (req, res) => {
     const buySig = parseSig(body, "buy");
     const permitSig = parseSig(body, "permit");
 
+    // ✅ DEBUG: verify BUY signature matches user (this catches wrong BlockSwap address / wrong nonce / wrong chainId instantly)
+    if (DEBUG_SIG) {
+      const chainIdRpc = await publicClient.getChainId().catch(() => CHAIN_ID);
+      const nonce = await publicClient.readContract({
+        address: BLOCKSWAP_ADDR,
+        abi: BLOCKSWAP_MIN_ABI,
+        functionName: "nonces",
+        args: [user],
+      });
+
+      const msgHash = buildBuyRelayedMsgHash({
+        buyer: user,
+        ozWei,
+        nonce: BigInt(nonce as any),
+        deadline: buyDeadline,
+        swapAddress: BLOCKSWAP_ADDR,
+        chainId: Number(chainIdRpc),
+      });
+
+      const recovered = await recoverFromSig({ msgHash, v: buySig.v, r: buySig.r, s: buySig.s });
+      const ok = recovered.toLowerCase() === user.toLowerCase();
+
+      if (!ok) {
+        return sendJson(
+          res,
+          {
+            ok: false,
+            error: "signature_mismatch",
+            debug: {
+              kind: "buy_permit_buySig",
+              user,
+              recovered,
+              chainIdRpc: Number(chainIdRpc),
+              swap: BLOCKSWAP_ADDR,
+              nonce: String(nonce),
+              buyDeadline: buyDeadline.toString(),
+              msgHash,
+            },
+          },
+          400
+        );
+      }
+    }
+
     const hash = await walletClient.writeContract({
-      address: BLOCKSWAP_ADDRESS,
+      address: BLOCKSWAP_ADDR,
       abi: BLOCKSWAP_MIN_ABI,
       functionName: "buyOzRelayedWithPermit",
       args: [
@@ -1081,14 +1268,15 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Relayer running on http://0.0.0.0:${PORT}`);
   console.log(`ChainId (env): ${CHAIN_ID}`);
   console.log(`Relayer wallet: ${account.address}`);
-  console.log(`BlockSwap: ${BLOCKSWAP_ADDRESS}`);
-  console.log(`NicknameRegistry: ${NICKNAME_REGISTRY_ADDRESS || "(unset)"}`);
+  console.log(`BlockSwap: ${BLOCKSWAP_ADDR}`);
+  console.log(`NicknameRegistry: ${NICKNAME_ADDR || "(unset)"}`);
   console.log(`CORS allowlist: ${Array.from(allowlist).join(", ")}`);
   console.log(`ALLOW_VERCEL_PREVIEWS: ${ALLOW_VERCEL_PREVIEWS ? "ON" : "OFF"}`);
   console.log(`Supabase: ${hasSupabase() ? "ON" : "OFF"}`);
   console.log(`Logs RPC: ${RPC_URL_LOGS || "(using RPC_URL)"}`);
   console.log(`Logs chunk blocks: ${LOGS_CHUNK_BLOCKS.toString()}`);
   console.log(`Admin key: ${ADMIN_KEY ? "ON" : "OFF"}`);
+  console.log(`DEBUG_SIG: ${DEBUG_SIG ? "ON" : "OFF"}`);
 
   if (ENABLE_CHAIN_SYNC && hasSupabase()) {
     initSyncCursorFromDb().then(() => {
