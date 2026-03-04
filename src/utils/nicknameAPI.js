@@ -11,6 +11,7 @@ import {
   parseAbiParameters,
   toBytes,
   getAddress,
+  signatureToHex, // ✅ added for object->hex reconstruction
 } from "viem";
 import { baseSepolia, base } from "viem/chains";
 
@@ -203,11 +204,58 @@ function isHexOnly(s) {
   return /^0x[0-9a-fA-F]+$/.test(String(s || "").trim());
 }
 
+function isBytes32Hex(x) {
+  const s = String(x || "").trim();
+  return /^0x[0-9a-fA-F]{64}$/.test(s);
+}
+
+// ✅ Improved extractor: supports Coinbase/Base Wallet object shapes (vs / yParityAndS)
 function extractHexSigFromAny(raw) {
   if (raw && typeof raw === "object") {
     if (raw.signature) return extractHexSigFromAny(raw.signature);
     if (raw.result) return extractHexSigFromAny(raw.result);
     if (raw.data) return extractHexSigFromAny(raw.data);
+
+    // ✅ EIP-2098 compact signature parts: { r, yParityAndS } or { r, vs }
+    const r = raw.r || raw.R;
+    const yParityAndS =
+      raw.yParityAndS ?? raw.y_parity_and_s ?? raw.vs ?? raw.VS ?? raw.yParityAnds ?? raw.yParityAndS;
+
+    if (isBytes32Hex(r) && isBytes32Hex(yParityAndS)) {
+      const rr = String(r).replace(/^0x/, "");
+      const vss = String(yParityAndS).replace(/^0x/, "");
+      // 64-byte compact sig: r(32) + vs(32)
+      const compact = `0x${rr}${vss}`;
+      return extractHexSigFromAny(compact);
+    }
+
+    // ✅ Some libs return { r, s, v } or { r, s, yParity }
+    const s = raw.s || raw.S;
+    const v = raw.v ?? raw.V;
+    const yParity = raw.yParity ?? raw.y_parity ?? raw.parity;
+
+    // Only accept if r and s are full bytes32.
+    if (isBytes32Hex(r) && isBytes32Hex(s) && (v != null || yParity != null)) {
+      const vNum = v != null ? normalizeV(Number(v)) : undefined;
+      const yParityNum =
+        yParity != null
+          ? Number(yParity)
+          : vNum != null
+            ? vNum === 28
+              ? 1
+              : 0
+            : 0;
+
+      const hex = signatureToHex({
+        r,
+        s,
+        yParity: yParityNum,
+        ...(vNum != null ? { v: BigInt(vNum) } : {}),
+      });
+
+      return extractHexSigFromAny(hex);
+    }
+
     raw = JSON.stringify(raw);
   }
 
@@ -326,7 +374,7 @@ function enforceLowS({ v, r, s }) {
   const sLow = pad32Hex(sBig);
   const sig = rebuildSigHex({ r, s: sLow, v: vv });
 
-  return { signature: sig, v: vv, r: r.toLowerCase(), s: sLow.toLowerCase() };
+  return { signature: sig, v: vv, r: String(r).toLowerCase(), s: String(sLow).toLowerCase() };
 }
 
 function normalizeSigTo65(sigLike) {
@@ -553,23 +601,40 @@ export async function setNicknameRelayed(nick, walletAddress, eip1193Provider, p
     msgHash: prep.msgHash,
   });
 
-  // ✅ now returns a fully normalized (low-s) signature + v/r/s
-  const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
-  dlog("normalized", { sigLen: signature?.length, v, r, s });
+  // ✅ Try to normalize on client (fast path for most wallets)
+  // ✅ If Coinbase/Base returns a signature that decodes to s=0 here,
+  //    we fall back to sending ONLY `signature` and let the relayer parse it.
+  let payload = {
+    user,
+    nick: trimmed,
+    deadline: prep.deadline,
+    signature: rawSigHex,
+  };
+
+  try {
+    const { signature, v, r, s } = normalizeSigTo65(rawSigHex);
+    dlog("normalized", { sigLen: signature?.length, v, r, s });
+
+    payload = {
+      user,
+      nick: trimmed,
+      deadline: prep.deadline,
+      v,
+      r,
+      s,
+      signature,
+    };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    dlog("normalize failed; fallback to signature-only", msg);
+    // signature-only payload already set
+  }
 
   const res = await withTimeout(
     fetch(`${relayerUrl}/relay/nickname`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        user,
-        nick: trimmed,
-        deadline: prep.deadline,
-        v,
-        r,
-        s,
-        signature,
-      }),
+      body: JSON.stringify(payload),
     }),
     20_000,
     "Relayer request timed out. Check VITE_RELAYER_URL and Fly.io status."

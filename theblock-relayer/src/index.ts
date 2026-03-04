@@ -436,21 +436,56 @@ function toIntStringSafe(v: any): string {
   return "0";
 }
 
+function isBytes32Hex(x: any): x is `0x${string}` {
+  const s = String(x || "").trim();
+  return /^0x[0-9a-fA-F]{64}$/.test(s);
+}
+function isHexSig64or65(x: any): boolean {
+  const s = String(x || "").trim();
+  return /^0x[0-9a-fA-F]{128}$/.test(s) || /^0x[0-9a-fA-F]{130}$/.test(s);
+}
+
 // --------------------
 // signature parsing (ACCEPT v/r/s OR signature string)
 // --------------------
 function extractHexSigFromAny(raw: any): string {
   if (raw && typeof raw === "object") {
+    // ✅ most wallets return a string under one of these
     if (raw.signature) return extractHexSigFromAny(raw.signature);
     if (raw.result) return extractHexSigFromAny(raw.result);
     if (raw.data) return extractHexSigFromAny(raw.data);
 
+    // ✅ some wallets/libraries return compact EIP-2098 parts:
+    //   { r, yParityAndS }  OR  { r, vs }  OR  { r, y_parity_and_s }
+    const r2098 = (raw as any).r || (raw as any).R;
+    const yParityAndS =
+      (raw as any).yParityAndS ??
+      (raw as any).y_parity_and_s ??
+      (raw as any).vs ??
+      (raw as any).VS ??
+      (raw as any).yParityAnds;
+
+    if (isBytes32Hex(r2098) && isBytes32Hex(yParityAndS)) {
+      // Build a 64-byte compact signature: r (32) + yParityAndS (32)
+      const rr = String(r2098).replace(/^0x/, "");
+      const vss = String(yParityAndS).replace(/^0x/, "");
+      const compact = `0x${rr}${vss}`;
+      return extractHexSigFromAny(compact);
+    }
+
+    // ✅ common object form: { r, s, v } or { r, s, yParity }
+    // IMPORTANT: only accept if r and s are FULL bytes32.
     const r = (raw as any).r || (raw as any).R;
     const s = (raw as any).s || (raw as any).S;
     const v = (raw as any).v ?? (raw as any).V;
     const yParity = (raw as any).yParity ?? (raw as any).y_parity ?? (raw as any).parity;
 
-    if (r && s && (v != null || yParity != null)) {
+    const rOk = isBytes32Hex(r);
+    const sOk = isBytes32Hex(s);
+
+    // If s is NOT bytes32 (e.g. "0x0"), DO NOT attempt to build a signature from it.
+    // This is exactly what Coinbase/Base Wallet sometimes does.
+    if (rOk && sOk && (v != null || yParity != null)) {
       const vNum = v != null ? normalizeV(Number(v)) : undefined;
 
       const yParityNum =
@@ -472,19 +507,31 @@ function extractHexSigFromAny(raw: any): string {
       return extractHexSigFromAny(hex);
     }
 
+    // Fallback: stringify and regex-extract a 64/65-byte signature
     raw = JSON.stringify(raw);
   }
 
   const s = String(raw || "").trim().replace(/^"+|"+$/g, "");
   if (!s || s === "0x") throw new Error("Signature missing/blocked (empty).");
 
+  // Pull the first long 0x... blob and trim to 64/65 signature lengths
   const mAny = s.match(/0x[0-9a-fA-F]{128,}/);
   if (mAny?.[0]) {
     const h = mAny[0];
+
     // prefer full 65-byte (0x + 130 hex) => length 132
-    if (h.length >= 132) return h.slice(0, 132);
+    if (h.length >= 132) {
+      const cand = h.slice(0, 132);
+      if (isHexSig64or65(cand)) return cand;
+      return cand; // keep behavior: return trimmed hex, decode will validate
+    }
+
     // compact 64-byte (0x + 128 hex) => length 130
-    if (h.length >= 130) return h.slice(0, 130);
+    if (h.length >= 130) {
+      const cand = h.slice(0, 130);
+      if (isHexSig64or65(cand)) return cand;
+      return cand;
+    }
   }
 
   throw new Error(`Signature invalid. Could not extract 64/65-byte hex signature (len=${s.length}).`);
@@ -517,30 +564,51 @@ function decode65(sig65: string): { v: number; r: `0x${string}`; s: `0x${string}
   return { v, r, s };
 }
 
+function isZeroBytes32(x: any): boolean {
+  const s = String(x || "").trim().toLowerCase();
+  return /^0x0+$/.test(s) && s.length === 66;
+}
+
 function parseSig(body: any, prefix?: "buy" | "permit") {
   const vKey = prefix ? `${prefix}V` : "v";
   const rKey = prefix ? `${prefix}R` : "r";
   const sKey = prefix ? `${prefix}S` : "s";
   const sigKey = prefix ? `${prefix}Signature` : "signature";
 
-  // Prefer explicit v/r/s if present
-  if (body?.[vKey] != null && body?.[rKey] && body?.[sKey]) {
-    const vNumRaw = Number(body[vKey]);
+  const rRaw = body?.[rKey];
+  const sRaw = body?.[sKey];
+  const vRaw = body?.[vKey];
+
+  const rStr = String(rRaw || "").trim();
+  const sStr = String(sRaw || "").trim();
+
+  const rLooks = /^0x[0-9a-fA-F]{64}$/.test(rStr);
+  const sLooks = /^0x[0-9a-fA-F]{64}$/.test(sStr);
+
+  // ✅ Coinbase/Base Wallet sometimes provides v/r/s but with s = 0x00..00 (poisoned)
+  const sPoisoned = sLooks && isZeroBytes32(sStr);
+
+  // Prefer explicit v/r/s ONLY when valid AND not poisoned
+  if (vRaw != null && rLooks && sLooks && !sPoisoned) {
+    const vNumRaw = Number(vRaw);
     if (!Number.isFinite(vNumRaw)) throw new Error(`Invalid ${vKey}`);
     const vNum = normalizeV(vNumRaw);
 
-    const r = String(body[rKey]).trim() as `0x${string}`;
-    const s = String(body[sKey]).trim() as `0x${string}`;
-    if (!/^0x[0-9a-fA-F]{64}$/.test(r)) throw new Error(`Invalid ${rKey}`);
-    if (!/^0x[0-9a-fA-F]{64}$/.test(s)) throw new Error(`Invalid ${sKey}`);
-
+    const r = rStr as `0x${string}`;
+    const s = sStr as `0x${string}`;
     return { v: vNum, r, s };
   }
 
-  const sigLike = body?.[sigKey];
+  // Otherwise fall back to signature-like field (string or object)
+  const sigLike = body?.[sigKey] ?? body?.signature ?? body?.sig;
   const sigHex = sigLike != null ? extractHexSigFromAny(sigLike) : "";
 
   if (!sigHex || sigHex === "0x") {
+    if (sPoisoned) {
+      throw new Error(
+        `${sKey}: wallet returned zero-s signature (Base/Coinbase). Need full signature string/object instead of v/r/s.`
+      );
+    }
     throw new Error(`${sigKey}: Signature missing/blocked (empty). Approve the signature prompt in the wallet and try again.`);
   }
 
@@ -550,7 +618,6 @@ function parseSig(body: any, prefix?: "buy" | "permit") {
 
   throw new Error(`Invalid ${sigKey} length. Got ${sigHex.length} chars; expected 130 or 132 total.`);
 }
-
 async function requireRelayerMatches() {
   const onchainRelayer = await publicClient.readContract({
     address: BLOCKSWAP_ADDR,
