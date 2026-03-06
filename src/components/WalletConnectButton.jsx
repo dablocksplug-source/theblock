@@ -88,7 +88,6 @@ export default function WalletConnectButton({
 
     ensureChain,
     connectMetaMask,
-    connectCoinbase,
     connectWalletConnect,
     disconnectWallet,
     availableConnectors,
@@ -293,13 +292,7 @@ export default function WalletConnectButton({
                       MetaMask
                     </button>
 
-                    <button
-                      type="button"
-                      className="w-full px-4 py-4 text-left text-base text-slate-200 hover:bg-slate-900"
-                      onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
-                    >
-                      Coinbase Wallet
-                    </button>
+                    
 
                     <button
                       type="button"
@@ -439,13 +432,7 @@ export default function WalletConnectButton({
             >
               MetaMask
             </button>
-            <button
-              type="button"
-              className="w-full px-4 py-2 text-left text-xs text-slate-200 hover:bg-slate-900"
-              onClick={() => safeConnect(connectCoinbase, "Coinbase connect failed.")}
-            >
-              Coinbase Wallet
-            </button>
+           
             <button
               type="button"
               className={
