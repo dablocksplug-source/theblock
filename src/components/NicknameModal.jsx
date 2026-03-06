@@ -70,7 +70,7 @@ export default function NicknameModal() {
       <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0b1220] shadow-2xl">
         <div className="flex items-center justify-between px-6 pt-5">
           <div className="text-lg font-semibold text-white">
-            Create Your Permanent Nickname
+            Claim Your Block Name
           </div>
           <button
             onClick={close}
@@ -89,7 +89,7 @@ export default function NicknameModal() {
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Enter nickname"
+              placeholder="Choose your block name"
               className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-white/25"
               maxLength={24}
               autoComplete="off"
@@ -115,7 +115,7 @@ export default function NicknameModal() {
             </button>
 
             <div className="mt-3 text-xs text-white/50">
-              Nickname must be 3–24 characters. One-time set per wallet.
+              Your Block name is permanent once claimed.
             </div>
 
             {nickname ? (
