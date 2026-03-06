@@ -67,7 +67,7 @@ export default function NicknameModal() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0b1220] shadow-2xl">
+      <div className="w-full max-w-lg rounded-2xl border border-cyan-400/20 bg-[#0b1220] shadow-[0_0_35px_rgba(34,211,238,0.15)]">
         <div className="flex items-center justify-between px-6 pt-5">
           <div className="text-lg font-semibold text-white">
             Claim Your Block Name
@@ -107,7 +107,7 @@ export default function NicknameModal() {
               disabled={!canSave}
               className={`mt-5 w-full rounded-xl py-3 font-semibold transition ${
                 canSave
-                  ? "bg-emerald-500 text-black hover:bg-emerald-400"
+                  ? "bg-emerald-500 text-black hover:bg-emerald-400 hover:shadow-[0_0_14px_rgba(16,185,129,0.6)]"
                   : "bg-emerald-500/40 text-black/40"
               }`}
             >
