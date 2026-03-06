@@ -8,15 +8,6 @@ function errToString(e) {
   return String(e?.shortMessage || e?.message || e);
 }
 
-function isMobileish() {
-  try {
-    const ua = (navigator?.userAgent || "").toLowerCase();
-    return ua.includes("android") || ua.includes("iphone") || ua.includes("ipad");
-  } catch {
-    return false;
-  }
-}
-
 export default function NicknameModal() {
   const {
     modalOpen,
@@ -29,8 +20,6 @@ export default function NicknameModal() {
 
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
-
-  const mobile = isMobileish();
 
   // ✅ If nickname already exists on-chain, never show this modal (safety net)
   useEffect(() => {
@@ -94,20 +83,7 @@ export default function NicknameModal() {
         </div>
 
         <div className="px-6 pb-6 pt-4">
-          <div className="text-sm text-white/70 mb-3">{helper}</div>
-
-          {/* ✅ Mobile UX hint (this is the “user-friendly” win) */}
-          {mobile ? (
-            <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-              <div className="font-semibold text-amber-100 mb-1">Mobile tip</div>
-              If you opened the site in Chrome/Safari and it kicked you into MetaMask,
-              the “Sign” prompt can fail to appear.
-              <div className="mt-2 text-amber-200/90">
-                Best fix: open the site inside <b>MetaMask → Browser</b> or connect using{" "}
-                <b>WalletConnect</b>.
-              </div>
-            </div>
-          ) : null}
+          <div className="mb-3 text-sm text-white/70">{helper}</div>
 
           <form onSubmit={onSubmit}>
             <input
@@ -121,7 +97,7 @@ export default function NicknameModal() {
             />
 
             {err ? (
-              <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 whitespace-pre-wrap">
+              <div className="mt-3 whitespace-pre-wrap rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
                 {err}
               </div>
             ) : null}
