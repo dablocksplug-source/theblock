@@ -1,6 +1,7 @@
 // src/App.jsx
 import React from "react";
 import { Outlet } from "react-router-dom";
+import { Analytics } from "@vercel/analytics/react";
 
 import SoundToggle from "./components/SoundToggle";
 import LayoutWrapper from "./layout/LayoutWrapper.jsx";
@@ -19,6 +20,7 @@ export default function App() {
           <PresaleGate>
             <Outlet />
           </PresaleGate>
+          <Analytics />
         </LayoutWrapper>
       </UIProvider>
     </ThemeProvider>
