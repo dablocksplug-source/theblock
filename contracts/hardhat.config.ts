@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-viem";
+import hardhatViem from "@nomicfoundation/hardhat-viem";
+import hardhatVerify from "@nomicfoundation/hardhat-verify";
 
 // Support BOTH naming styles so old scripts/envs still work.
 const PK =
@@ -10,8 +11,8 @@ const PK =
 
 const BASE_MAINNET_RPC =
   process.env.BASE_MAINNET_RPC ||
-  process.env.RPC_URL || // your new style
-  "https://mainnet.base.org"; // fallback (rate-limited)
+  process.env.RPC_URL ||
+  "https://mainnet.base.org";
 
 const BASE_SEPOLIA_RPC =
   process.env.BASE_SEPOLIA_RPC ||
@@ -20,14 +21,18 @@ const BASE_SEPOLIA_RPC =
   "https://sepolia.base.org";
 
 const config: HardhatUserConfig = {
+  plugins: [hardhatViem, hardhatVerify],
+
+  // Use the compiler version your contracts were actually deployed with.
   solidity: "0.8.28",
+
   paths: {
     sources: "./contracts",
     artifacts: "./artifacts",
     cache: "./cache",
   },
+
   networks: {
-    // ✅ Base Sepolia (testnet)
     baseSepolia: {
       type: "http",
       chainId: 84532,
@@ -35,12 +40,17 @@ const config: HardhatUserConfig = {
       accounts: PK ? [PK] : [],
     },
 
-    // ✅ Base Mainnet
     base: {
       type: "http",
       chainId: 8453,
       url: BASE_MAINNET_RPC,
       accounts: PK ? [PK] : [],
+    },
+  },
+
+  verify: {
+    etherscan: {
+      apiKey: process.env.ETHERSCAN_API_KEY || "",
     },
   },
 };
